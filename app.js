@@ -181,7 +181,7 @@ function onRemote() {
 }
 
 /* ---------- cabecera y menú ---------- */
-const VIEWT = { leads: 'Leads', agenda: 'Agenda', exp: 'Expedientes', act: 'Actividad del equipo', equipo: 'Equipo', tarifas: 'Tarifas' };
+const VIEWT = { ventas: 'Quién interviene', leads: 'Leads', agenda: 'Agenda', exp: 'Expedientes', act: 'Actividad del equipo', equipo: 'Equipo', tarifas: 'Tarifas' };
 function renderTop() {
   const hd = document.querySelector('header.top'); hd.hidden = !me;
   if (!me) { $('who').innerHTML = ''; $('crumb').innerHTML = ''; return; }
@@ -194,7 +194,7 @@ function menuItems() {
   if (r === 'captacion') { it.push(['new:lead', '+ Nuevo lead', 'Llamada, web, WhatsApp o feria', 0, 1]); it.push(['leads', 'Leads', 'Contactar y agendar visitas', pend]); it.push(['agenda', 'Agenda de comerciales', 'Ver huecos antes de dar cita', 0]); }
   if (r === 'comercial') { it.push(['agenda', 'Mi agenda', 'Visitas y rellenar la ficha', E.filter(e => e.comercial === me.id && e.etapa === 'visita').length]); it.push(['new:ficha', '+ Ficha sin cita', 'Visita que no venía de captación', 0, 1]); it.push(['exp', 'Mis expedientes', 'Respuestas de clientes y estado', E.filter(e => e.comercial === me.id && e.etapa === 'enviado').length]); }
   if (r === 'oficina') { it.push(['exp', 'Bandeja', 'Fichas nuevas y presupuestos', pend]); it.push(['new:lead', '+ Nuevo lead', 'Si entra una llamada en oficina', 0]); it.push(['agenda', 'Agenda', 'Visitas de comerciales', 0]); }
-  if (r === 'direccion') { it.push(['exp', 'Expedientes', 'Aprobar y ver todo', pend]); it.push(['act', 'Actividad del equipo', 'Quién ha hecho qué y cuándo', 0]); it.push(['agenda', 'Agenda', 'Visitas de comerciales', 0]); it.push(['new:lead', '+ Nuevo lead', 'Registrar un cliente', 0]); }
+  if (r === 'direccion') { it.push(['exp', 'Expedientes', 'Aprobar y ver todo', pend]); it.push(['ventas', 'Quién interviene', 'Ventas cerradas y quién hizo cada paso', 0]); it.push(['act', 'Actividad del equipo', 'Quién ha hecho qué y cuándo', 0]); it.push(['agenda', 'Agenda', 'Visitas de comerciales', 0]); it.push(['new:lead', '+ Nuevo lead', 'Registrar un cliente', 0]); }
   if (['captacion', 'comercial', 'oficina', 'direccion'].includes(r)) it.push(['tarifas', 'Tarifas', r === 'direccion' ? 'Ver y cambiar precios' : 'Precios y cuotas', 0]);
   if (me.admin) it.push(['equipo', 'Equipo', 'Altas, roles y contraseñas', 0]);
   return it;
@@ -229,7 +229,7 @@ async function render(showDetail, soft) {
   if (!me) return;
   if (!view) return renderMenu();
   if (['exp', 'leads'].includes(view)) return renderGrid(showDetail, soft);
-  ({ agenda: renderAgenda, act: renderAct, equipo: renderEquipo, tarifas: renderTarifas })[view]();
+  ({ agenda: renderAgenda, act: renderAct, ventas: renderVentas, equipo: renderEquipo, tarifas: renderTarifas })[view]();
 }
 
 /* ---------- lista + expediente ---------- */
@@ -611,6 +611,56 @@ function renderTarifas() {
     return h + `<tr><td>${r.placas} PL + INV ${r.inversor_kw} kW${+r.bateria_kwh ? ` + BAT ${r.bateria_kwh} kWh` : ''}</td><td class="num">${cell('pvp_mono', r.pvp_mono)}</td><td class="num">${cell('pvp_tri', r.pvp_tri)}</td><td class="num">${eur(r.pvp_mono / 1.21, 2)}</td></tr>`; }).join('');
   $('main').innerHTML = `<section class="panel page"><div class="page-h"><div><p>${ed ? 'Puedes cambiar los precios: se guardan al salir de la casilla y se aplican a las sugerencias de oficina.' : 'El precio sugerido de cada expediente sale de esta tabla.'}</p></div></div>
    <div class="tblw"><table class="t"><thead><tr><th>Instalación</th><th style="text-align:right">PVP monofásica</th><th style="text-align:right">PVP trifásica</th><th style="text-align:right">Sin IVA (financiera)</th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="empty">Sin tarifas.</td></tr>'}</tbody></table></div></section>`;
+}
+
+
+/* ---------- quién interviene en cada venta (dirección) ---------- */
+let ventMes = 'all', ventWho = 'all', ventRows = [];
+async function renderVentas() {
+  $('main').innerHTML = `<section class="panel page"><div class="empty">Cargando ventas…</div></section>`;
+  const ventas = E.filter(e => e.etapa === 'aceptado');
+  let evs = [];
+  if (ventas.length) {
+    const { data, error } = await sb.from('eventos').select('expediente_id,actor,tipo,created_at').in('expediente_id', ventas.map(e => e.id)).in('tipo', ['visita', 'ficha', 'aceptada', 'presupuesto', 'aprobado', 'venta']).order('id');
+    if (error) { toast(errMsg(error)); return; }
+    evs = data || [];
+  }
+  const last = (id, t) => { let r = null; for (const x of evs) if (x.expediente_id === id && x.tipo === t) r = x; return r; };
+  ventRows = ventas.map(e => {
+    const v = last(e.id, 'venta');
+    return { e, fecha: v?.created_at || e.updated_at, importe: +e.presupuesto?.final || 0, pago: e.pago?.forma || '',
+      capto: e.captador || null, agendo: last(e.id, 'visita')?.actor || null, comercial: e.comercial || null,
+      oficina: last(e.id, 'presupuesto')?.actor || null, aprobo: last(e.id, 'aprobado')?.actor || null, cerro: v?.actor || null };
+  }).sort((a, b) => String(b.fecha).localeCompare(String(a.fecha)));
+  const meses = [...new Set(ventRows.map(r => String(r.fecha).slice(0, 7)))].sort().reverse();
+  const mesTxt = m => new Date(m + '-15').toLocaleDateString('es-ES', { month: 'long', year: 'numeric' });
+  const ROLES_V = [['capto', 'Captó'], ['agendo', 'Agendó'], ['comercial', 'Comercial'], ['oficina', 'Presupuesto'], ['aprobo', 'Aprobó'], ['cerro', 'Cerró']];
+  let rows = ventRows.filter(r => ventMes === 'all' || String(r.fecha).startsWith(ventMes));
+  if (ventWho !== 'all') rows = rows.filter(r => ROLES_V.some(([k]) => r[k] === ventWho));
+  const total = rows.reduce((s, r) => s + r.importe, 0);
+  const ppl = team.filter(p => ROLES_V.some(([k]) => rows.some(r => r[k] === p.id)));
+  const cell = id => id ? esc(nm(id)) : '<span class="hint">—</span>';
+  $('main').innerHTML = `<section class="panel page" style="margin-bottom:14px"><div class="page-h"><div><h3 class="h3">Quién interviene en cada venta</h3><p>Sale del registro del servidor, que nadie puede modificar. Toca un cliente para ver su trazabilidad completa.</p></div>
+    <button class="btn sm" data-act-v="csv" ${rows.length ? '' : 'disabled'}>Descargar para Excel</button></div>
+   <div class="row" style="margin-bottom:12px"><label class="fl">Mes<select id="vMes"><option value="all">Todos</option>${meses.map(m => `<option value="${m}" ${m === ventMes ? 'selected' : ''}>${mesTxt(m)}</option>`).join('')}</select></label>
+    <label class="fl">Persona<select id="vWho"><option value="all">Todo el equipo</option>${team.map(p => `<option value="${p.id}" ${p.id === ventWho ? 'selected' : ''}>${esc(p.nombre)}</option>`).join('')}</select></label></div>
+   <div class="kpis"><div class="kpi hot"><div class="v">${rows.length}</div><div class="l">Venta${rows.length === 1 ? '' : 's'} cerrada${rows.length === 1 ? '' : 's'}</div></div><div class="kpi"><div class="v">${eur(total)}</div><div class="l">Importe total (IVA incl.)</div></div></div>
+   ${rows.length ? `<div class="tblw"><table class="t"><thead><tr><th>Venta</th><th>Cliente</th><th style="text-align:right">Importe</th>${ROLES_V.map(([, t]) => `<th>${t}</th>`).join('')}</tr></thead><tbody>
+   ${rows.map(r => `<tr><td style="white-space:nowrap">${fDate(r.fecha)}</td><td><button type="button" class="lnk" data-tz="${r.e.id}">${esc(r.e.cliente?.nombre)}</button><br><span class="hint">${esc(r.pago)}</span></td><td class="num">${eur(r.importe)}</td>${ROLES_V.map(([k]) => `<td>${cell(r[k])}</td>`).join('')}</tr>`).join('')}
+   </tbody></table></div>` : `<div class="empty">No hay ventas cerradas${ventMes !== 'all' || ventWho !== 'all' ? ' con este filtro' : ' todavía'}.</div>`}</section>
+  ${ppl.length ? `<section class="panel page"><div class="page-h"><div><h3 class="h3">Resumen por persona</h3><p>En cuántas de estas ventas ha intervenido cada uno y en qué papel.</p></div></div>
+   <div class="tblw"><table class="t"><thead><tr><th>Persona</th>${ROLES_V.map(([, t]) => `<th style="text-align:right">${t}</th>`).join('')}<th style="text-align:right">Importe de sus ventas</th></tr></thead><tbody>
+   ${ppl.map(p => { const mine = rows.filter(r => ROLES_V.some(([k]) => r[k] === p.id)); return `<tr><td><b>${esc(p.nombre)}</b><br><span class="hint">${ROLTXT[p.rol]}</span></td>${ROLES_V.map(([k]) => `<td class="num">${rows.filter(r => r[k] === p.id).length || '<span class="hint">—</span>'}</td>`).join('')}<td class="num">${eur(mine.reduce((s, r) => s + r.importe, 0))}</td></tr>`; }).join('')}
+   </tbody></table></div></section>` : ''}`;
+  $('vMes').onchange = ev => { ventMes = ev.target.value; renderVentas(); };
+  $('vWho').onchange = ev => { ventWho = ev.target.value; renderVentas(); };
+  document.querySelector('[data-act-v="csv"]').onclick = () => {
+    const q = s => `"${String(s ?? '').replace(/"/g, '""')}"`;
+    const head = ['Fecha venta', 'Expediente', 'Cliente', 'Población', 'Importe IVA incl.', 'Forma de pago', ...ROLES_V.map(([, t]) => t)];
+    const lines = [head.map(q).join(';'), ...rows.map(r => [new Date(r.fecha).toLocaleDateString('es-ES'), r.e.id, r.e.cliente?.nombre, r.e.cliente?.pueblo, String(r.importe).replace('.', ','), r.pago, ...ROLES_V.map(([k]) => r[k] ? nm(r[k]) : '')].map(q).join(';'))];
+    const blob = new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `ventas-intervenciones-${ventMes === 'all' ? 'todas' : ventMes}.csv`; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500);
+  };
 }
 
 /* ---------- eventos de la interfaz ---------- */
