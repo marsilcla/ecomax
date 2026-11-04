@@ -1,7 +1,7 @@
 {
   "name": "Ecomax Equipo",
   "short_name": "Ecomax Equipo",
-  "description": "Leads, visitas, presupuestos, instalaciones y comisiones del equipo de Ecomax Energía.",
+  "description": "Leads, visitas, presupuestos y trazabilidad del equipo de Ecomax Energía.",
   "lang": "es",
   "start_url": "./",
   "scope": "./",

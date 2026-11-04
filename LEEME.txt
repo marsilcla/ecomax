@@ -1,14 +1,7 @@
-Ecomax Equipo - app instalable (PWA)
+Ecomax Equipo
 
-Contenido:
-  index.html             la app
-  manifest.webmanifest   nombre, icono y colores al instalarla
-  sw.js                  permite abrirla sin conexión
-  icons/                 iconos para Android, iPhone y PC
+Raíz: la app real, conectada al servidor (Supabase, región UE).
+/demo/: la demo con datos de ejemplo, para enseñar sin tocar datos reales.
 
-Para usarla como app hay que subir la carpeta entera a un hosting con https
-(Netlify, Cloudflare Pages o GitHub Pages). Abierta como archivo desde el
-ordenador funciona, pero no se puede instalar.
-
-Usuarios de prueba: el nombre de cada persona (ana, marga, gonzalo...)
-Contraseña de prueba: 1234
+Primera vez: al abrir la app real aparece "Configurar" para crear el usuario
+administrador. Después, el administrador da de alta al equipo desde "Equipo".
