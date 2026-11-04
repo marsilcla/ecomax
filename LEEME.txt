@@ -1,0 +1,14 @@
+Ecomax Equipo - app instalable (PWA)
+
+Contenido:
+  index.html             la app
+  manifest.webmanifest   nombre, icono y colores al instalarla
+  sw.js                  permite abrirla sin conexión
+  icons/                 iconos para Android, iPhone y PC
+
+Para usarla como app hay que subir la carpeta entera a un hosting con https
+(Netlify, Cloudflare Pages o GitHub Pages). Abierta como archivo desde el
+ordenador funciona, pero no se puede instalar.
+
+Usuarios de prueba: el nombre de cada persona (ana, marga, gonzalo...)
+Contraseña de prueba: 1234
