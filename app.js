@@ -65,11 +65,11 @@ function needsMe(e) {
   const r = role();
   if (r === 'captacion') return e.etapa === 'lead';
   if (r === 'comercial') return e.comercial === me.id && ['visita', 'enviado'].includes(e.etapa);
-  if (r === 'oficina') return ['solicitud', 'preparacion', 'devuelta', 'aprobado'].includes(e.etapa);
+  if (r === 'oficina') return ['solicitud', 'preparacion', 'devuelta', 'aprobado'].includes(e.etapa) || faltaTaclia(e);
   if (r === 'direccion') return e.etapa === 'aprobacion';
   return false;
 }
-const isOpen = e => !['aceptado', 'rechazado', 'descartado'].includes(e.etapa);
+const isOpen = e => !['aceptado', 'rechazado', 'descartado'].includes(e.etapa) || faltaTaclia(e);
 function sumario(e) {
   const f = e.ficha || {}, p = [];
   if (f.fv) p.push(`${f.fv.placas} placas${+f.fv.batN ? ` + ${f.fv.batN}×${f.fv.batKWh} kWh` : ''}`);
@@ -81,7 +81,7 @@ function taskLabel(e) {
   const r = role();
   if (r === 'captacion') return 'Contactar y agendar visita';
   if (r === 'comercial') return e.etapa === 'visita' ? `Visita ${fDate(e.visita_fecha)} ${hhmm(e.visita_hora)} · rellenar ficha` : 'Marcar respuesta del cliente';
-  if (r === 'oficina') return ({ solicitud: 'Aceptar ficha nueva', preparacion: 'Hacer presupuesto en Taclia', devuelta: 'Corregir lo que pide dirección', aprobado: 'Enviar presupuesto al cliente' })[e.etapa] || 'Revisar';
+  if (r === 'oficina') return ({ solicitud: 'Aceptar ficha nueva', preparacion: 'Hacer presupuesto en Taclia', devuelta: 'Corregir lo que pide dirección', aprobado: 'Enviar presupuesto al cliente' })[e.etapa] || (faltaTaclia(e) ? 'Pasar a Taclia' : 'Revisar');
   if (r === 'direccion') return `Dar visto bueno · ${eur(e.presupuesto?.propuesto)}`;
   return 'Abrir';
 }
@@ -92,6 +92,53 @@ function tarifaDe(e) {
   if (!r) return { miss: true, txt: `${f.placas} placas${bat ? ` + ${bat} kWh de batería` : ''}` };
   const tri = f.instalacion === 'Trifásica';
   return { r, tri, precio: tri ? (r.pvp_tri ?? +r.pvp_mono + 2000) : +r.pvp_mono, label: `${r.placas} PL + INV ${r.inversor_kw} kW${+r.bateria_kwh ? ` + BAT ${r.bateria_kwh} kWh` : ''}` };
+}
+function eqTexto(e) {
+  const f = e.ficha?.fv, a = e.ficha?.aero, L = [];
+  if (f) { const bat = (+f.batN || 0) * (+f.batKWh || 0);
+    L.push(`${f.placas} paneles solares de ${f.potPlaca} W (${((f.placas * f.potPlaca) / 1000).toLocaleString('es-ES')} kWp)`);
+    L.push(`${f.invN > 1 ? f.invN + ' inversores' : 'Inversor'} híbrido de ${f.invKW} kW ${String(f.instalacion || '').toLowerCase()}`);
+    if (bat) L.push(`${f.batN > 1 ? f.batN + ' baterías de ' + f.batKWh + ' kWh' : 'Batería de ' + f.batKWh + ' kWh'} (${bat} kWh en total)`);
+    if (f.cargador && f.cargador !== 'No') L.push('Cargador de coche eléctrico de 8,5 kW (Modo 3)'); }
+  if (a) L.push(`Aerotermia para ${a.m2 || '?'} m²${a.hibridar === 'Sí' ? ', hibridada con ' + (a.hibSist || 'el sistema actual') : ''}`);
+  return L;
+}
+function datosIA(e, numero, precio) {
+  const c = e.cliente || {}, f = e.ficha?.fv, a = e.ficha?.aero;
+  const P = +precio || 0;
+  return [`Haz el presupuesto con el mismo diseño de los presupuestos de Ecomax Energía (cabecera con el logo, "Presupuesto para", fecha, ubicación y nº de presupuesto, equipos incluidos, especificaciones técnicas, precio total, financiación, beneficios y pie con 654 094 963 · info@ecomaxenergia.com · www.ecomaxenergia.com).`, '',
+    `Presupuesto para: ${c.nombre || ''}`, `Ubicación: ${[c.calle, c.pueblo].filter(Boolean).join(', ')}`,
+    `Fecha: ${new Date().toLocaleDateString('es-ES', { day: 'numeric', month: 'long', year: 'numeric' })}`, `Presupuesto nº: ${numero || ''}`, '',
+    'Equipos incluidos:', ...eqTexto(e).map(x => '- ' + x), '',
+    'Especificaciones: estructura y pequeño material, cableado y protecciones, instalación y puesta en marcha, legalizaciones y certificados incluidos en el precio, monitorización.',
+    f ? `Datos de la visita: cubierta ${f.cubierta}; Solar Bloc ${f.solarBloc}; grúa ${f.grua}; distancia del cuadro al inversor ${f.distInv} m y a la batería ${f.distBat} m.` : '',
+    a ? `Datos de la visita: ${a.m2} m², ${a.plantas} plantas, ${a.personas} personas, emisores ${a.emisores}, combustible actual ${a.combustible}.` : '',
+    '', `Precio total: ${eur(P)} (IVA incluido)`,
+    P ? `Financiación: 12 meses sin intereses ${eur(cuota(P, 12), 2)}/mes · 120 cuotas ${eur(cuota(P, 120), 2)}/mes (orientativo).` : '',
+    'Garantías: paneles 25 años de producción; inversor [revisar años]; batería 10 años o 6.000 ciclos.',
+    e.ficha?.notas ? `Observaciones del comercial: ${e.ficha.notas}` : ''].filter(x => x !== null && x !== undefined).join('\n').replace(/\n{3,}/g, '\n\n');
+}
+function datosTaclia(e) {
+  const c = e.cliente || {}, f = e.ficha?.fv, P = +e.presupuesto?.final || 0, base = P / 1.21, L = [];
+  L.push(`CLIENTE: ${c.nombre || ''} · ${[c.calle, c.pueblo].filter(Boolean).join(', ')} · ${c.tel || ''}${c.email ? ' · ' + c.email : ''}`, '', 'CONCEPTOS (cantidad):');
+  if (f) { const bat = (+f.batN || 0) * (+f.batKWh || 0);
+    L.push(`FTV + PLACA SOLAR RÍGIDA (${f.placas}) · Placas de última generación ${f.potPlaca} W`);
+    L.push(`FTV INVERSOR ${f.invKW}KW (${f.invN || 1}) · Inversor híbrido ${f.invKW} kW ${String(f.instalacion || '').toLowerCase()} para autoconsumo`);
+    if (bat) L.push(`FTV BATERÍA ${f.batKWh} kWh (${f.batN}) · Batería de litio de alto rendimiento`);
+    if (f.cargador && f.cargador !== 'No') L.push('FTV CARGADOR COCHE (1) · Cargador de coche 8,5 kW, modo 3');
+    L.push('FTV LEGALIZACIONES (1) · Memoria técnica y estudio SS, trámites ayuntamiento, CIE, CFO, RITSIC, RAC, bonificación IBI');
+    L.push('FTV CERTIFICADOS ENERGÉTICOS (1) · Certificado antes y después para la deducción del IRPF'); }
+  if (e.ficha?.aero) L.push(`AEROTERMIA (1) · ${eqTexto(e).slice(-1)[0]}`);
+  L.push(`TOTAL INSTALACIÓN (1) · Llave en mano · ${eur(base, 2)} + IVA 21 %`, '', `Base imponible: ${eur(base, 2)}`, `IVA 21 %: ${eur(P - base, 2)}`, `TOTAL: ${eur(P, 2)}`, '',
+    'Método de pago: 70% a la aceptación por transferencia (concepto: nombre del cliente y nº de presupuesto) y 30% al finalizar la instalación y la puesta en marcha.');
+  return L.join('\n');
+}
+function obsTaclia(e) {
+  const pr = e.presupuesto || {}, pg = e.pago, o = [];
+  if (pr.numero) o.push(`Presupuesto Ecomax ${pr.numero}.`);
+  if (pg) o.push(`Forma de pago: ${pg.forma}${pg.plazo ? ' a ' + pg.plazo + ' meses' : ''}.`);
+  if (e.ficha?.fv?.altSinBat) o.push('El cliente pidió también versión sin batería.');
+  return o.join(' ');
 }
 const cuota = (Pr, n) => { if (n <= 24) return Pr / n; const r = 0.0625 / 12; return Pr * r / (1 - Math.pow(1 + r, -n)); };
 
@@ -272,7 +319,19 @@ function stepsHTML(e) { const k = ST[e.etapa].k, idx = k === 9 ? -1 : Math.min(k
 const opt = (a, v) => a.map(o => `<option ${o == v ? 'selected' : ''}>${o}</option>`).join('');
 const comerciales = () => team.filter(p => p.rol === 'comercial' && p.activo);
 
-function actionBox(e) { return corrRecibidas(e) + actionMain(e) + corrDireccion(e); }
+function actionBox(e) { return corrRecibidas(e) + actionMain(e) + tacliaBox(e) + corrDireccion(e); }
+const faltaTaclia = e => ['enviado', 'aceptado'].includes(e.etapa) && !e.presupuesto?.taclia;
+function tacliaBox(e) {
+  const pr = e.presupuesto || {};
+  if (role() !== 'oficina') return '';
+  if (pr.taclia) return '';
+  if (!faltaTaclia(e)) return '';
+  return `<div class="action"><h3>Último paso: pásalo a Taclia</h3><p>Copia los datos en Taclia. Lo que Taclia no deja poner va en observaciones.</p>
+   <details><summary style="cursor:pointer;font-weight:600">Datos para Taclia (listos para copiar)</summary><div class="note" id="txtTaclia" style="margin-top:8px;max-height:260px;overflow:auto">${esc(datosTaclia(e))}</div><div class="row" style="margin-top:8px"><button class="btn sm" data-copy="txtTaclia" style="flex:0 0 auto">Copiar datos</button></div></details>
+   <div class="row"><label class="fl">Nº que te da Taclia<input type="text" id="tacNum" placeholder="EE-2026-388"></label></div>
+   <label class="fl">Observaciones puestas en Taclia<textarea id="tacObs">${esc(obsTaclia(e))}</textarea></label>
+   <button class="btn primary" data-act="taclia">Marcar como pasado a Taclia</button></div>`;
+}
 function corrRecibidas(e) {
   const l = myCorr().filter(c => c.expediente_id === e.id);
   return l.map(c => `<div class="action" style="background:var(--bad-soft);border-color:color-mix(in srgb,var(--bad) 35%,transparent)"><h3>Corrección de ${esc(nm(c.actor))}</h3><p>“${esc(c.comentario)}” · ${fWhen(c.created_at)}</p><div class="row"><label class="fl">Qué has hecho (opcional)<input type="text" id="resNota-${c.id}"></label><button class="btn primary" data-act="resolver" data-cid="${c.id}" style="flex:0 0 auto">Marcar como hecha</button></div></div>`).join('');
@@ -298,17 +357,21 @@ function actionMain(e) {
   if (r === 'oficina' && e.etapa === 'solicitud') return `<div class="action"><h3>Ficha nueva de ${esc(nm(e.comercial))}</h3><p>Al aceptarla, el comercial ve que oficina ya la tiene.</p><button class="btn primary big" data-act="aceptar">Aceptar y empezar presupuesto</button></div>`;
   if (r === 'oficina' && ['preparacion', 'devuelta'].includes(e.etapa)) {
     const t = tarifaDe(e); const dev = [...detail.eventos].reverse().find(x => ['devuelto', 'cambios'].includes(x.tipo));
-    const th = e.ficha?.fv ? (t.miss ? `<p class="hint">Sin tarifa exacta para <b>${esc(t.txt)}</b>. Precio a criterio; dirección lo validará.</p>` : `<p class="hint">Tarifa: <b>${t.label}</b>${t.tri ? ' · trifásica' : ''} → <b>${eur(t.precio)}</b> IVA incl.</p>`) : `<p class="hint">Sin tarifa cargada para esta instalación. Pon el precio de Taclia.</p>`;
-    return `<div class="action"><h3>${e.etapa === 'devuelta' ? 'Devuelta: corrige y vuelve a pasar' : 'Haz el presupuesto en Taclia y súbelo aquí'}</h3>
+    const th = e.ficha?.fv ? (t.miss ? `<p class="hint">Sin tarifa exacta para <b>${esc(t.txt)}</b>. Precio a criterio; dirección lo validará.</p>` : `<p class="hint">Tarifa: <b>${t.label}</b>${t.tri ? ' · trifásica' : ''} → <b>${eur(t.precio)}</b> IVA incl.</p>`) : `<p class="hint">Sin tarifa cargada para esta instalación. Pon el precio a criterio.</p>`;
+    const d = new Date(), num = e.presupuesto?.numero || `ECO-${String(d.getDate()).padStart(2, '0')}${String(d.getMonth() + 1).padStart(2, '0')}-${e.id}`, prS = e.presupuesto?.propuesto ?? (t && !t.miss ? t.precio : '');
+    return `<div class="action"><h3>${e.etapa === 'devuelta' ? 'Devuelta: corrige y vuelve a pasar' : 'Haz el presupuesto y pásalo a dirección'}</h3>
+     <p>Con los datos de la ficha, hazlo con la IA en el formato de Ecomax y súbelo aquí (PDF o imagen). Taclia se rellena al final, cuando ya esté aprobado y enviado.</p>
+     <details><summary style="cursor:pointer;font-weight:600">Datos para la IA (listos para copiar)</summary><div class="note" id="txtIA" style="margin-top:8px;max-height:260px;overflow:auto">${esc(datosIA(e, num, prS))}</div><div class="row" style="margin-top:8px"><button class="btn sm" data-copy="txtIA" style="flex:0 0 auto">Copiar datos</button></div></details>
      ${dev && e.etapa !== 'preparacion' || (dev && dev.tipo === 'cambios') ? `<p>“${esc(dev.comentario || '')}” — ${esc(nm(dev.actor))}</p>` : ''}${th}${e.ficha?.fv?.altSinBat ? `<p class="hint"><b>Ojo:</b> el comercial pide también una versión sin batería.</p>` : ''}
-     <div class="row"><label class="fl">Nº presupuesto Taclia<input type="text" id="tacliaNo" value="${esc(e.presupuesto?.taclia || '')}" placeholder="EE-2026-395"></label>
-     <label class="fl">Precio propuesto (IVA incl.)<input type="number" id="precioProp" step="50" value="${e.presupuesto?.propuesto ?? (t && !t.miss ? t.precio : '')}"></label></div>
-     <label class="fl">PDF exportado de Taclia${e.presupuesto?.pdf ? ' (ya hay uno; sube otro solo si cambia)' : ''}<input type="file" id="pdfIn" accept="application/pdf"></label>
+     <div class="row"><label class="fl">Nº de presupuesto<input type="text" id="presNum" value="${esc(num)}"></label>
+     <label class="fl">Precio (IVA incl.)<input type="number" id="precioProp" step="50" value="${prS}"></label></div>
+     <label class="fl">Presupuesto hecho (PDF o imagen)${e.presupuesto?.archivo ? ' · ya hay uno; sube otro solo si cambia' : ''}<input type="file" id="presFile" accept="application/pdf,image/*"></label>
      <button class="btn primary big" data-act="subir">Pasar a dirección para aprobar</button></div>`;
   }
   if (r === 'direccion' && e.etapa === 'aprobacion') {
     const t = tarifaDe(e), tp = t && !t.miss ? t.precio : null, pr = +e.presupuesto?.propuesto, diff = tp != null ? pr - tp : null;
-    return `<div class="action"><h3>Revisa, ajusta el precio y aprueba</h3>
+    return `<div class="action"><h3>Revisa el presupuesto ${esc(e.presupuesto?.numero || '')} y da el visto bueno</h3>
+     ${e.presupuesto?.archivo ? `<div class="row"><button class="btn primary sm" data-open-file="${esc(e.presupuesto.archivo)}" style="flex:0 0 auto">Ver el presupuesto</button></div>` : ''}
      <div class="cmp"><div><span class="tag">Tarifa</span><div class="v">${tp != null ? eur(tp) : '—'}</div><span class="hint">${t ? (t.miss ? 'Sin tarifa exacta' : esc(t.label)) : 'Sin tarifa'}</span></div>
      <div><span class="tag">Propone oficina</span><div class="v">${eur(pr)}</div><span class="hint">${diff ? `${diff > 0 ? '+' : ''}${eur(diff)} vs tarifa` : tp != null ? 'Igual que tarifa' : ''}</span></div>
      <div><span class="tag">Base para financiera</span><div class="v">${eur(pr / 1.21, 2)}</div><span class="hint">Sin IVA</span></div></div>
@@ -320,11 +383,11 @@ function actionMain(e) {
   }
   if (r === 'oficina' && e.etapa === 'aprobado') return `<div class="action"><h3>Visto bueno: ${eur(e.presupuesto?.final)} · envíalo al cliente</h3>
     ${(() => { const a = [...detail.eventos].reverse().find(x => x.tipo === 'aprobado'); return a?.comentario ? `<p>“${esc(a.comentario)}” — ${esc(nm(a.actor))}</p>` : ''; })()}
-    <div class="row"><button class="btn sm" data-act="propuesta" style="flex:0 0 auto">Ver propuesta para el cliente</button>${e.presupuesto?.pdf ? `<button class="btn sm" data-open-file="${esc(e.presupuesto.pdf)}" style="flex:0 0 auto">PDF de Taclia</button>` : ''}</div>
+    ${e.presupuesto?.archivo ? `<div class="row"><button class="btn sm" data-open-file="${esc(e.presupuesto.archivo)}" style="flex:0 0 auto">Ver el presupuesto aprobado</button></div>` : ''}
     <div class="row"><label class="fl">Cómo lo has enviado<select id="envMedio"><option>Email</option><option>WhatsApp</option><option>En mano (comercial)</option><option>Correo postal</option></select></label><label class="fl">Nota (opcional)<input type="text" id="envNota" placeholder="Ej.: enviado a montse.ferrer@correo.es"></label></div>
     <button class="btn primary big" data-act="enviar">Marcar como enviado al cliente</button></div>`;
   if (((r === 'comercial' && e.comercial === me.id) || r === 'oficina') && e.etapa === 'enviado') return `<div class="action"><h3>Enviado al cliente: ${eur(e.presupuesto?.final)}</h3><p>Cuando el cliente conteste, marca aquí su respuesta.</p>
-    <div class="row"><button class="btn sm" data-act="propuesta" style="flex:0 0 auto">Ver propuesta para el cliente</button></div>
+    ${e.presupuesto?.archivo ? `<div class="row"><button class="btn sm" data-open-file="${esc(e.presupuesto.archivo)}" style="flex:0 0 auto">Ver el presupuesto</button></div>` : ''}
     <div class="row"><label class="fl">Forma de pago<select id="pgForma"><option>Contado</option><option>Financiado</option><option>Mixto</option></select></label>
     <label class="fl">Plazo si financia<select id="pgPlazo"><option value="12">12 meses · 0%</option><option value="24">24 meses · 0% + 3,5%</option><option value="60">60 meses</option><option value="120" selected>120 meses</option></select></label></div>
     <label class="fl">Comentario (cambios o motivo)<input type="text" id="cliNota"></label>
@@ -369,7 +432,9 @@ function tabTraz(e) {
   const Pz = lst('presupuesto'); S.push({ rol: 'oficina', who: Pz?.actor || null, what: Pz ? Pz.detalle : 'Presupuesto pendiente', w: Pz?.created_at, done: !!Pz });
   const Ap = lst('aprobado'); S.push({ rol: 'direccion', who: Ap?.actor || null, what: Ap ? Ap.detalle : 'Visto bueno pendiente', w: Ap?.created_at, done: !!Ap });
   const En = lst('enviado'); S.push({ rol: 'oficina', who: En?.actor || null, what: En ? En.detalle : 'Envío al cliente pendiente', w: En?.created_at, done: !!En });
+  const Tc = lst('taclia');
   const Vt = lst('venta'), Rc = lst('rechazo'); S.push({ rol: 'comercial', who: (Vt || Rc)?.actor || e.comercial, what: Vt ? `Marcó la venta: el cliente acepta · ${e.pago?.forma || ''}` : Rc ? 'Marcó que el cliente rechaza' : 'Esperando respuesta del cliente', w: (Vt || Rc)?.created_at, done: !!Vt, bad: !!Rc });
+  if (En) S.push({ rol: 'oficina', who: Tc?.actor || null, what: Tc ? Tc.detalle : 'Pendiente de pasar a Taclia', w: Tc?.created_at, done: !!Tc });
   const chain = `<ol class="chain">${S.map(s => `<li class="${s.done ? 'ok' : s.bad ? 'bad' : 'pend'}"><span class="av">${s.who ? ini(s.who) : '?'}</span><div><span class="tag">${ROLTXT[(s.who && P(s.who)?.rol) || s.rol]}</span><b>${s.who ? esc(nm(s.who)) : 'Sin asignar'}</b><span class="what">${esc(s.what)}</span></div><span class="when">${s.w ? fWhen(s.w) : s.done ? '' : '—'}</span></li>`).join('')}</ol>`;
   return `<p class="hint" style="margin:0 0 12px">Se registra en el servidor: cada paso guarda quién lo hizo y cuándo. Nadie puede editarlo ni borrarlo, tampoco el administrador.</p>${chain}
   ${(() => { const cs = CORR.filter(c => c.expediente_id === e.id); return cs.length ? `<div class="sec"><h4>Correcciones de dirección (${cs.length})</h4><ol class="tl">${cs.map(c => `<li><span class="t">${fWhen(c.created_at)} · ${esc(nm(c.actor))} → ${esc(nm(c.para))}</span><br>“${esc(c.comentario)}” <span class="pill ${c.done ? 'p-ok' : 'p-bad'}">${c.done ? 'Hecha ' + fWhen(c.done.created_at) : 'Pendiente'}</span>${c.done?.comentario ? `<span class="c">${esc(c.done.comentario)}</span>` : ''}</li>`).join('')}</ol></div>` : ''; })()}
@@ -387,9 +452,10 @@ function tabPres(e) {
   const t = tarifaDe(e), pr = e.presupuesto || {};
   const Pp = pr.final || pr.propuesto || (t && !t.miss ? t.precio : null);
   return `<div class="sec"><h4>Tarifa aplicable</h4><div class="note">${e.ficha?.fv ? (t.miss ? `Sin tarifa exacta para ${esc(t.txt)}.` : `${t.label}${t.tri ? ' · trifásica' : ' · monofásica'} → ${eur(t.precio)} IVA incluido (${eur(t.precio / 1.21, 2)} sin IVA)`) : 'Sin tarifa para esta instalación.'}</div></div>
-  ${pr.taclia ? `<div class="sec"><h4>Presupuesto</h4><div class="files"><div class="file"><span class="ico">PDF</span><div><div class="fn">Taclia ${esc(pr.taclia)}</div><div class="hint">Propuesto ${eur(pr.propuesto)}${pr.final ? ` · aprobado ${eur(pr.final)}` : ''}</div></div>${pr.pdf ? `<button class="btn sm" data-open-file="${esc(pr.pdf)}">Abrir</button>` : ''}</div></div></div>` : `<div class="sec"><div class="empty">Oficina sube aquí el presupuesto de Taclia cuando esté hecho.</div></div>`}
+  ${pr.numero ? `<div class="sec"><h4>Presupuesto</h4><div class="files"><div class="file"><span class="ico">PDF</span><div><div class="fn">${esc(pr.numero)}</div><div class="hint">Propuesto ${eur(pr.propuesto)}${pr.final ? ` · visto bueno ${eur(pr.final)}` : ''}${pr.medio ? ` · enviado por ${esc(pr.medio)}` : ''}</div></div>${pr.archivo ? `<button class="btn sm" data-open-file="${esc(pr.archivo)}">Abrir</button>` : ''}</div></div></div>` : `<div class="sec"><div class="empty">Oficina sube aquí el presupuesto cuando esté hecho.</div></div>`}
+  ${pr.taclia ? `<div class="sec"><h4>Taclia</h4><dl class="kv"><div><dt>Nº en Taclia</dt><dd>${esc(pr.taclia)}</dd></div><div><dt>Pasado el</dt><dd>${fWhen(pr.taclia_en)}</dd></div></dl>${pr.taclia_obs ? `<div class="note" style="margin-top:8px">Observaciones: ${esc(pr.taclia_obs)}</div>` : ''}</div>` : (pr.final ? `<div class="sec"><h4>Taclia</h4><div class="note">Pendiente de pasar a Taclia${['enviado', 'aceptado'].includes(e.etapa) ? '' : ' (se hace después de enviarlo al cliente)'}.</div></div>` : '')}
   ${Pp ? `<div class="sec"><h4>Cuotas orientativas</h4><dl class="kv"><div><dt>12 meses · 0%</dt><dd>${eur(cuota(Pp, 12), 2)}/mes</dd></div><div><dt>24 meses · 0% + 3,5%</dt><dd>${eur(cuota(Pp, 24), 2)}/mes</dd></div><div><dt>60 meses · 6,25%</dt><dd>${eur(cuota(Pp, 60), 2)}/mes</dd></div><div><dt>120 meses · 6,25%</dt><dd>${eur(cuota(Pp, 120), 2)}/mes</dd></div></dl><p class="hint" style="margin-top:6px">Simulación no contractual.</p></div>` : ''}
-  ${pr.final ? `<div class="sec"><button class="btn primary" data-act="propuesta">Ver propuesta para el cliente</button></div>` : ''}`;
+`;
 }
 function tabDocs(e) {
   const A = detail.archivos;
@@ -515,12 +581,15 @@ async function act(a, el) {
       case 'descartar': await rpc('descartar_lead', { p_exp: e.id, p_motivo: v('segNota') }); toast('Lead descartado.'); break;
       case 'aceptar': await rpc('aceptar_ficha', { p_exp: e.id }); toast('Aceptada. El comercial lo ve.'); break;
       case 'subir': {
-        const f = $('pdfIn').files[0]; let path = null;
-        if (!f && !e.presupuesto?.pdf) throw new Error('Falta adjuntar el PDF de Taclia');
-        if (f) { el.textContent = 'Subiendo PDF…'; path = await uploadFile(e.id, f, 'presupuesto'); }
-        await rpc('subir_presupuesto', { p_exp: e.id, p_taclia: v('tacliaNo'), p_precio: +v('precioProp') || null, p_pdf_path: path });
-        toast('Pasado a dirección.'); break;
+        const f = $('presFile').files[0]; let path = null;
+        if (!f && !e.presupuesto?.archivo) throw new Error('Falta adjuntar el presupuesto (PDF o imagen)');
+        if (!v('presNum')) throw new Error('Falta el número de presupuesto');
+        if (!(+v('precioProp') > 0)) throw new Error('Falta el precio');
+        if (f) { el.textContent = 'Subiendo presupuesto…'; path = await uploadFile(e.id, f, 'presupuesto'); }
+        await rpc('preparar_presupuesto', { p_exp: e.id, p_numero: v('presNum'), p_precio: +v('precioProp'), p_archivo: path });
+        toast('Pasado a dirección para el visto bueno.'); break;
       }
+      case 'taclia': await rpc('pasar_a_taclia', { p_exp: e.id, p_numero_taclia: v('tacNum'), p_observaciones: v('tacObs') }); toast('Marcado como pasado a Taclia. Expediente completo.'); break;
       case 'aprobar': await rpc('aprobar_presupuesto', { p_exp: e.id, p_precio: +v('precioFin') || null, p_nota: v('notaAp') }); toast('Visto bueno dado. Oficina lo enviará al cliente.'); break;
       case 'enviar': await rpc('enviar_al_cliente', { p_exp: e.id, p_medio: v('envMedio'), p_nota: v('envNota') }); toast('Marcado como enviado. El comercial lo ve.'); break;
       case 'corregir': await rpc('indicar_correccion', { p_exp: e.id, p_para: v('corPara'), p_texto: v('corTxt') }); toast(`Corrección enviada a ${nm(v('corPara'))}.`); break;
@@ -551,7 +620,7 @@ function openProp(e) {
   const spec = f ? [['Paneles solares', `${f.placas} × ${f.potPlaca} W (${((f.placas * f.potPlaca) / 1000).toLocaleString('es-ES')} kWp)`], ['Inversor', `${f.invKW} kW ${String(f.instalacion).toLowerCase()}`], ...(bat ? [['Batería', `${bat} kWh (LiFePO4)`]] : []), ...(f.cargador && f.cargador !== 'No' ? [['Cargador coche', '8,5 kW (Modo 3)']] : []), ['Estructura y pequeño material', 'Incluidos'], ['Cableado y protecciones', 'Incluidos'], ['Instalación y puesta en marcha', 'Incluida'], ['Legalizaciones', 'Incluidas en el precio'], ['Certificados', 'Incluidos en el precio'], ['Monitorización', 'Incluida']] : [['Equipo', 'Aerotermia según presupuesto'], ['Instalación y puesta en marcha', 'Incluida'], ['Legalizaciones', 'Incluidas']];
   $('modalSlot').innerHTML = `<div class="modal" role="dialog" aria-label="Propuesta" data-act="closeModal"><div class="modal-bar"><span>Propuesta para el cliente</span><button class="btn sm" data-act="closeModal">Cerrar</button></div>
   <article class="doc"><div class="doc-top"><img src="icons/logo.png" alt="Ecomax Energía"><div class="tt"><b>PRESUPUESTO</b><span>Instalación ${f ? 'solar' + (bat ? ' con batería' : '') : ''}${f && a ? ' y ' : ''}${a ? 'aerotermia' : ''}</span></div></div>
-  <div class="doc-cli"><div><small>Presupuesto para</small><b>${esc(c.nombre)}</b></div><div><small>Fecha</small>${new Date().toLocaleDateString('es-ES', { day: 'numeric', month: 'long', year: 'numeric' })}</div><div><small>Ubicación</small>${esc([c.calle, c.pueblo].filter(Boolean).join(', '))}</div><div><small>Presupuesto nº</small>${esc(e.presupuesto?.taclia || '')}</div></div>
+  <div class="doc-cli"><div><small>Presupuesto para</small><b>${esc(c.nombre)}</b></div><div><small>Fecha</small>${new Date().toLocaleDateString('es-ES', { day: 'numeric', month: 'long', year: 'numeric' })}</div><div><small>Ubicación</small>${esc([c.calle, c.pueblo].filter(Boolean).join(', '))}</div><div><small>Presupuesto nº</small>${esc(e.presupuesto?.numero || '')}</div></div>
   <div class="doc-sec"><h5 class="g">Equipos incluidos</h5><div class="doc-eq">${eq.map(([x, y, z]) => `<div><b>${esc(x)}</b>${esc(y)}<br>${esc(z)}</div>`).join('')}</div></div>
   <div class="doc-two"><div class="doc-sec"><h5>Especificaciones técnicas</h5><table class="doc-spec">${spec.map(([x, y]) => `<tr><td>${x}</td><td>${y}</td></tr>`).join('')}</table></div>
    <div style="display:flex;flex-direction:column;gap:16px"><div class="doc-sec"><h5 class="g">Precio total</h5><div class="doc-price"><b>${eur(Pr)}</b><span>IVA incluido</span></div><div class="doc-fin"><div>12 meses sin intereses<b>${eur(cuota(Pr, 12), 2)}</b>/mes</div><div>120 cuotas<b>${eur(cuota(Pr, 120), 2)}</b>/mes</div></div></div>
@@ -651,7 +720,7 @@ async function renderVentas() {
   const ventas = E.filter(e => e.etapa === 'aceptado');
   let evs = [];
   if (ventas.length) {
-    const { data, error } = await sb.from('eventos').select('expediente_id,actor,tipo,created_at').in('expediente_id', ventas.map(e => e.id)).in('tipo', ['visita', 'ficha', 'aceptada', 'presupuesto', 'aprobado', 'enviado', 'venta']).order('id');
+    const { data, error } = await sb.from('eventos').select('expediente_id,actor,tipo,created_at').in('expediente_id', ventas.map(e => e.id)).in('tipo', ['visita', 'ficha', 'aceptada', 'presupuesto', 'aprobado', 'enviado', 'venta', 'taclia']).order('id');
     if (error) { toast(errMsg(error)); return; }
     evs = data || [];
   }
@@ -660,11 +729,11 @@ async function renderVentas() {
     const v = last(e.id, 'venta');
     return { e, fecha: v?.created_at || e.updated_at, importe: +e.presupuesto?.final || 0, pago: e.pago?.forma || '',
       capto: e.captador || null, agendo: last(e.id, 'visita')?.actor || null, comercial: e.comercial || null,
-      oficina: last(e.id, 'presupuesto')?.actor || null, aprobo: last(e.id, 'aprobado')?.actor || null, envio: last(e.id, 'enviado')?.actor || null, cerro: v?.actor || null };
+      oficina: last(e.id, 'presupuesto')?.actor || null, aprobo: last(e.id, 'aprobado')?.actor || null, envio: last(e.id, 'enviado')?.actor || null, cerro: v?.actor || null, taclia: last(e.id, 'taclia')?.actor || null };
   }).sort((a, b) => String(b.fecha).localeCompare(String(a.fecha)));
   const meses = [...new Set(ventRows.map(r => String(r.fecha).slice(0, 7)))].sort().reverse();
   const mesTxt = m => new Date(m + '-15').toLocaleDateString('es-ES', { month: 'long', year: 'numeric' });
-  const ROLES_V = [['capto', 'Captó'], ['agendo', 'Agendó'], ['comercial', 'Comercial'], ['oficina', 'Presupuesto'], ['aprobo', 'Visto bueno'], ['envio', 'Envió'], ['cerro', 'Marcó la venta']];
+  const ROLES_V = [['capto', 'Captó'], ['agendo', 'Agendó'], ['comercial', 'Comercial'], ['oficina', 'Presupuesto'], ['aprobo', 'Visto bueno'], ['envio', 'Envió'], ['cerro', 'Marcó la venta'], ['taclia', 'Pasó a Taclia']];
   let rows = ventRows.filter(r => ventMes === 'all' || String(r.fecha).startsWith(ventMes));
   if (ventWho !== 'all') rows = rows.filter(r => ROLES_V.some(([k]) => r[k] === ventWho));
   const total = rows.reduce((s, r) => s + r.importe, 0);
