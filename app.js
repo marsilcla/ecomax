@@ -23,13 +23,13 @@ const ROLLAB = { captacion: 'Captación · leads y citas', comercial: 'Comercial
 const ST = {
   lead: { t: 'Lead nuevo', c: 'p-new', k: 0 }, visita: { t: 'Visita agendada', c: 'p-info', k: 1 },
   solicitud: { t: 'Ficha recibida', c: 'p-new', k: 2 }, preparacion: { t: 'En preparación', c: 'p-info', k: 2 }, devuelta: { t: 'Devuelta a oficina', c: 'p-bad', k: 2 },
-  aprobacion: { t: 'Pendiente de aprobar', c: 'p-warn', k: 3 }, enviado: { t: 'Enviado al cliente', c: 'p-ok', k: 4 },
-  aceptado: { t: 'Venta cerrada', c: 'p-done', k: 5 }, rechazado: { t: 'Rechazado', c: 'p-bad', k: 9 }, descartado: { t: 'Descartado', c: 'p-mute', k: 9 },
+  aprobacion: { t: 'Pendiente de visto bueno', c: 'p-warn', k: 3 }, aprobado: { t: 'Visto bueno · falta enviar', c: 'p-warn', k: 4 }, enviado: { t: 'Enviado al cliente', c: 'p-ok', k: 5 },
+  aceptado: { t: 'Venta cerrada', c: 'p-done', k: 6 }, rechazado: { t: 'Rechazado', c: 'p-bad', k: 9 }, descartado: { t: 'Descartado', c: 'p-mute', k: 9 },
 };
-const STEPS = ['Lead', 'Visita', 'Presupuesto', 'Aprobación', 'Cliente', 'Venta'];
+const STEPS = ['Lead', 'Visita', 'Presupuesto', 'Visto bueno', 'Envío', 'Cliente', 'Venta'];
 
 /* ---------- estado ---------- */
-let me = null, empresa = null, team = [], tarifas = [], E = [];
+let me = null, empresa = null, team = [], tarifas = [], E = [], CORR = [];
 let view = null, sel = null, sub = 'res', filt = 'pend', mode = 'view', day = null, actWho = 'all';
 let detail = { id: null, eventos: [], archivos: [] };
 const P = id => team.find(p => p.id === id);
@@ -46,7 +46,12 @@ async function loadAll() {
   ]);
   if (t.error) throw t.error; if (ex.error) throw ex.error;
   team = t.data || []; tarifas = ta.data || []; E = ex.data || [];
+  const co = await sb.from('eventos').select('id,expediente_id,actor,tipo,comentario,datos,created_at').in('tipo', ['correccion', 'correccion_hecha']).order('id');
+  const ev = co.data || [], hechas = {};
+  ev.filter(x => x.tipo === 'correccion_hecha').forEach(x => { hechas[x.datos?.ref] = x; });
+  CORR = ev.filter(x => x.tipo === 'correccion').map(x => ({ ...x, para: x.datos?.para, done: hechas[x.id] || null }));
 }
+const myCorr = () => CORR.filter(c => !c.done && c.para === me?.id);
 async function loadDetail(id) {
   const [ev, ar] = await Promise.all([
     sb.from('eventos').select('*').eq('expediente_id', id).order('id'),
@@ -60,7 +65,7 @@ function needsMe(e) {
   const r = role();
   if (r === 'captacion') return e.etapa === 'lead';
   if (r === 'comercial') return e.comercial === me.id && ['visita', 'enviado'].includes(e.etapa);
-  if (r === 'oficina') return ['solicitud', 'preparacion', 'devuelta'].includes(e.etapa);
+  if (r === 'oficina') return ['solicitud', 'preparacion', 'devuelta', 'aprobado'].includes(e.etapa);
   if (r === 'direccion') return e.etapa === 'aprobacion';
   return false;
 }
@@ -76,8 +81,8 @@ function taskLabel(e) {
   const r = role();
   if (r === 'captacion') return 'Contactar y agendar visita';
   if (r === 'comercial') return e.etapa === 'visita' ? `Visita ${fDate(e.visita_fecha)} ${hhmm(e.visita_hora)} · rellenar ficha` : 'Marcar respuesta del cliente';
-  if (r === 'oficina') return ({ solicitud: 'Aceptar ficha nueva', preparacion: 'Hacer presupuesto en Taclia', devuelta: 'Corregir lo que pide dirección' })[e.etapa] || 'Revisar';
-  if (r === 'direccion') return `Aprobar ${eur(e.presupuesto?.propuesto)}`;
+  if (r === 'oficina') return ({ solicitud: 'Aceptar ficha nueva', preparacion: 'Hacer presupuesto en Taclia', devuelta: 'Corregir lo que pide dirección', aprobado: 'Enviar presupuesto al cliente' })[e.etapa] || 'Revisar';
+  if (r === 'direccion') return `Dar visto bueno · ${eur(e.presupuesto?.propuesto)}`;
   return 'Abrir';
 }
 function tarifaDe(e) {
@@ -181,7 +186,7 @@ function onRemote() {
 }
 
 /* ---------- cabecera y menú ---------- */
-const VIEWT = { ventas: 'Quién interviene', leads: 'Leads', agenda: 'Agenda', exp: 'Expedientes', act: 'Actividad del equipo', equipo: 'Equipo', tarifas: 'Tarifas' };
+const VIEWT = { corr: 'Correcciones', ventas: 'Quién interviene', leads: 'Leads', agenda: 'Agenda', exp: 'Expedientes', act: 'Actividad del equipo', equipo: 'Equipo', tarifas: 'Tarifas' };
 function renderTop() {
   const hd = document.querySelector('header.top'); hd.hidden = !me;
   if (!me) { $('who').innerHTML = ''; $('crumb').innerHTML = ''; return; }
@@ -193,9 +198,9 @@ function menuItems() {
   const r = role(), it = [], pend = E.filter(needsMe).length;
   if (r === 'captacion') { it.push(['new:lead', '+ Nuevo lead', 'Llamada, web, WhatsApp o feria', 0, 1]); it.push(['leads', 'Leads', 'Contactar y agendar visitas', pend]); it.push(['agenda', 'Agenda de comerciales', 'Ver huecos antes de dar cita', 0]); }
   if (r === 'comercial') { it.push(['agenda', 'Mi agenda', 'Visitas y rellenar la ficha', E.filter(e => e.comercial === me.id && e.etapa === 'visita').length]); it.push(['new:ficha', '+ Ficha sin cita', 'Visita que no venía de captación', 0, 1]); it.push(['exp', 'Mis expedientes', 'Respuestas de clientes y estado', E.filter(e => e.comercial === me.id && e.etapa === 'enviado').length]); }
-  if (r === 'oficina') { it.push(['exp', 'Bandeja', 'Fichas nuevas y presupuestos', pend]); it.push(['new:lead', '+ Nuevo lead', 'Si entra una llamada en oficina', 0]); it.push(['agenda', 'Agenda', 'Visitas de comerciales', 0]); }
-  if (r === 'direccion') { it.push(['exp', 'Expedientes', 'Aprobar y ver todo', pend]); it.push(['ventas', 'Quién interviene', 'Ventas cerradas y quién hizo cada paso', 0]); it.push(['act', 'Actividad del equipo', 'Quién ha hecho qué y cuándo', 0]); it.push(['agenda', 'Agenda', 'Visitas de comerciales', 0]); it.push(['new:lead', '+ Nuevo lead', 'Registrar un cliente', 0]); }
-  if (['captacion', 'comercial', 'oficina', 'direccion'].includes(r)) it.push(['tarifas', 'Tarifas', r === 'direccion' ? 'Ver y cambiar precios' : 'Precios y cuotas', 0]);
+  if (r === 'oficina') { it.push(['exp', 'Bandeja', 'Fichas nuevas, presupuestos y envíos', pend]); it.push(['new:lead', '+ Nuevo lead', 'Si entra una llamada en oficina', 0]); it.push(['agenda', 'Agenda', 'Visitas de comerciales', 0]); }
+  if (r === 'direccion') { it.push(['exp', 'Expedientes', 'Visto bueno y revisión de todo', pend]); it.push(['corr', 'Correcciones', 'Las que has indicado y si están hechas', CORR.filter(c => !c.done).length]); it.push(['ventas', 'Quién interviene', 'Ventas cerradas y quién hizo cada paso', 0]); it.push(['act', 'Actividad del equipo', 'Quién ha hecho qué y cuándo', 0]); it.push(['agenda', 'Agenda', 'Visitas de comerciales', 0]); }
+  if (['captacion', 'comercial', 'oficina', 'direccion'].includes(r)) it.push(['tarifas', 'Tarifas', r === 'oficina' ? 'Ver y cambiar precios' : 'Precios y cuotas', 0]);
   if (me.admin) it.push(['equipo', 'Equipo', 'Altas, roles y contraseñas', 0]);
   return it;
 }
@@ -214,11 +219,14 @@ function renderMenu() {
     $('main').innerHTML = `<div class="hello"><h1>Hola, ${esc(me.nombre.split(' ')[0])}</h1><p>Tu apartado (${r === 'instalador' ? 'instalaciones' : 'comparativas de luz y gas'}) llega en la próxima fase. Ya tienes tu usuario creado.</p></div>`; return;
   }
   const tasks = E.filter(needsMe).sort((a, b) => ST[a.etapa].k - ST[b.etapa].k || a.id - b.id);
+  const corrs = myCorr(); const byId = Object.fromEntries(E.map(e => [e.id, e]));
+  const corrHTML = corrs.map(c => `<button type="button" class="task" data-task="${c.expediente_id}" style="border-left-color:var(--bad)"><span class="t-a" style="color:var(--bad)">Corrección de ${esc(nm(c.actor))}</span><b>${esc(byId[c.expediente_id]?.cliente?.nombre || '#' + c.expediente_id)}</b><span class="hint">“${esc(c.comentario)}”</span></button>`).join('');
+  const nTask = tasks.length + corrs.length;
   const it = menuItems(), nw = it.filter(x => x[4]), rest = it.filter(x => !x[4]);
-  $('main').innerHTML = `<div class="hello"><h1>Hola, ${esc(me.nombre.split(' ')[0])}</h1><p>${tasks.length ? `Tienes ${tasks.length} cosa${tasks.length === 1 ? '' : 's'} por hacer.` : 'Lo tienes todo al día.'}</p></div>
+  $('main').innerHTML = `<div class="hello"><h1>Hola, ${esc(me.nombre.split(' ')[0])}</h1><p>${nTask ? `Tienes ${nTask} cosa${nTask === 1 ? '' : 's'} por hacer.` : 'Lo tienes todo al día.'}</p></div>
   <div class="home">
    ${nw.map(([k, t, d]) => `<button type="button" class="mbtn new slim" data-go="${k}"><b>${t}</b><span class="d">${d}</span></button>`).join('')}
-   <section><h2 class="h-sec">Lo que te toca</h2>${tasks.length ? `<div class="tasks">${tasks.map(e => `<button type="button" class="task" data-task="${e.id}"><span class="t-a">${esc(taskLabel(e))}</span><b>${esc(e.cliente?.nombre)}</b><span class="hint">${esc(sumario(e))}${e.cliente?.pueblo ? ' · ' + esc(e.cliente.pueblo) : ''}</span></button>`).join('')}</div>` : `<div class="empty panel">No tienes nada pendiente. Cuando llegue algo nuevo aparecerá aquí al momento.</div>`}</section>
+   <section><h2 class="h-sec">Lo que te toca</h2>${nTask ? `<div class="tasks">${corrHTML}${tasks.map(e => `<button type="button" class="task" data-task="${e.id}"><span class="t-a">${esc(taskLabel(e))}</span><b>${esc(e.cliente?.nombre)}</b><span class="hint">${esc(sumario(e))}${e.cliente?.pueblo ? ' · ' + esc(e.cliente.pueblo) : ''}</span></button>`).join('')}</div>` : `<div class="empty panel">No tienes nada pendiente. Cuando llegue algo nuevo aparecerá aquí al momento.</div>`}</section>
    <section><h2 class="h-sec">Más</h2><div class="more">${rest.map(([k, t, d, n]) => `<button type="button" class="mini" data-go="${k}"><b>${t}</b>${n ? `<span class="badge">${n}</span>` : ''}<span class="hint">${d}</span></button>`).join('')}</div></section>
   </div>`;
 }
@@ -229,7 +237,7 @@ async function render(showDetail, soft) {
   if (!me) return;
   if (!view) return renderMenu();
   if (['exp', 'leads'].includes(view)) return renderGrid(showDetail, soft);
-  ({ agenda: renderAgenda, act: renderAct, ventas: renderVentas, equipo: renderEquipo, tarifas: renderTarifas })[view]();
+  ({ agenda: renderAgenda, act: renderAct, ventas: renderVentas, corr: renderCorr, equipo: renderEquipo, tarifas: renderTarifas })[view]();
 }
 
 /* ---------- lista + expediente ---------- */
@@ -239,7 +247,7 @@ function renderGrid(showDetail, soft) {
   const pend = all.filter(needsMe).length, open = all.filter(isOpen).length;
   let l = filt === 'pend' ? all.filter(needsMe) : filt === 'open' ? all.filter(isOpen) : all;
   const title = view === 'leads' ? 'Leads' : r === 'comercial' ? 'Mis expedientes' : r === 'oficina' ? 'Bandeja' : 'Expedientes';
-  const newBtn = r === 'comercial' ? `<button class="btn sun sm" data-go="new:ficha" type="button">+ Ficha</button>` : ['captacion', 'oficina', 'direccion'].includes(r) ? `<button class="btn sun sm" data-go="new:lead" type="button">+ Lead</button>` : '';
+  const newBtn = r === 'comercial' ? `<button class="btn sun sm" data-go="new:ficha" type="button">+ Ficha</button>` : ['captacion', 'oficina'].includes(r) ? `<button class="btn sun sm" data-go="new:lead" type="button">+ Lead</button>` : '';
   const items = l.length ? l.map(e => { const s = ST[e.etapa]; return `<li><button type="button" class="item" data-id="${e.id}" aria-current="${e.id === sel && mode === 'view'}"><span class="nm">${esc(e.cliente?.nombre)}</span><span class="pill ${s.c}">${s.t}</span><span class="sub">${esc(sumario(e))}${e.cliente?.pueblo ? ' · ' + esc(e.cliente.pueblo) : ''}</span><span class="ref">#${e.id}</span></button></li>`; }).join('')
     : `<li class="empty">${filt === 'pend' ? 'No tienes nada pendiente.' : 'Todavía no hay expedientes.'}</li>`;
   const keepScroll = soft ? document.querySelector('.detail')?.scrollTop : 0;
@@ -260,13 +268,23 @@ async function openExp(id, s) {
   render(true); window.scrollTo({ top: 0 });
 }
 function person(id, r) { if (!id) return ''; return `<span class="person"><span class="av">${ini(id)}</span>${esc(nm(id))}<small>· ${r}</small></span>`; }
-function stepsHTML(e) { const k = ST[e.etapa].k, idx = k === 9 ? -1 : Math.min(k, 5); return `<ol class="steps">${STEPS.map((s, i) => `<li class="${i < idx || e.etapa === 'aceptado' ? 'done' : i === idx ? 'now' : ''}">${s}</li>`).join('')}</ol>`; }
+function stepsHTML(e) { const k = ST[e.etapa].k, idx = k === 9 ? -1 : Math.min(k, 6); return `<ol class="steps">${STEPS.map((s, i) => `<li class="${i < idx || e.etapa === 'aceptado' ? 'done' : i === idx ? 'now' : ''}">${s}</li>`).join('')}</ol>`; }
 const opt = (a, v) => a.map(o => `<option ${o == v ? 'selected' : ''}>${o}</option>`).join('');
 const comerciales = () => team.filter(p => p.rol === 'comercial' && p.activo);
 
-function actionBox(e) {
+function actionBox(e) { return corrRecibidas(e) + actionMain(e) + corrDireccion(e); }
+function corrRecibidas(e) {
+  const l = myCorr().filter(c => c.expediente_id === e.id);
+  return l.map(c => `<div class="action" style="background:var(--bad-soft);border-color:color-mix(in srgb,var(--bad) 35%,transparent)"><h3>Corrección de ${esc(nm(c.actor))}</h3><p>“${esc(c.comentario)}” · ${fWhen(c.created_at)}</p><div class="row"><label class="fl">Qué has hecho (opcional)<input type="text" id="resNota-${c.id}"></label><button class="btn primary" data-act="resolver" data-cid="${c.id}" style="flex:0 0 auto">Marcar como hecha</button></div></div>`).join('');
+}
+function corrDireccion(e) {
+  if (role() !== 'direccion') return '';
+  const ppl = team.filter(p => p.activo && (['oficina', 'captacion'].includes(p.rol) || p.id === e.comercial || p.id === e.captador));
+  return `<details class="action wait"><summary style="cursor:pointer;font-weight:600">Indicar una corrección a alguien del equipo</summary><div style="display:flex;flex-direction:column;gap:8px;margin-top:10px"><label class="fl">Para<select id="corPara">${ppl.map(p => `<option value="${p.id}" ${p.id === (e.etapa === 'visita' || e.etapa === 'enviado' ? e.comercial : '') ? 'selected' : ''}>${esc(p.nombre)} · ${ROLTXT[p.rol]}</option>`).join('')}</select></label><label class="fl">Qué tiene que corregir<textarea id="corTxt" placeholder="Ej.: falta la foto del contador"></textarea></label><p class="hint">Le aparece como tarea hasta que la marque como hecha. Queda en la trazabilidad.</p><button class="btn sm" data-act="corregir">Enviar corrección</button></div></details>`;
+}
+function actionMain(e) {
   const r = role(); const c = e.cliente || {};
-  if (['captacion', 'oficina', 'direccion'].includes(r) && e.etapa === 'lead') return `<div class="action"><h3>Contactar y agendar visita</h3>
+  if (['captacion', 'oficina'].includes(r) && e.etapa === 'lead') return `<div class="action"><h3>Contactar y agendar visita</h3>
     <div class="quick">${['No contesta', 'Buzón', 'WhatsApp enviado', 'Habla con cliente'].map(t => `<button class="btn sm" data-act="contacto" data-t="${t}">${t}</button>`).join('')}</div>
     <label class="fl">Nota del contacto (opcional)<input type="text" id="segNota" placeholder="Ej.: casa en propiedad, quiere 8 placas"></label>
     <div class="row"><label class="fl">Comercial<select id="agCom">${comerciales().map(p => `<option value="${p.id}">${esc(p.nombre)}</option>`).join('') || '<option value="">No hay comerciales dados de alta</option>'}</select></label>
@@ -274,11 +292,11 @@ function actionBox(e) {
     <label class="fl">Dirección de la visita<input type="text" id="agDir" value="${esc(c.calle || '')}" placeholder="Calle y número"></label>
     <div class="row"><button class="btn primary" data-act="agendar">Agendar visita</button><button class="btn ghost" data-act="descartar">Descartar lead</button></div></div>`;
   if (r === 'comercial' && e.comercial === me.id && e.etapa === 'visita') return `<div class="action"><h3>Visita ${fDate(e.visita_fecha)} · ${hhmm(e.visita_hora)}</h3><p>Al terminar, rellena la ficha. Le llega a oficina al momento.</p><button class="btn sun big" data-act="ficha">Rellenar ficha de visita</button></div>`;
-  if (['captacion', 'oficina', 'direccion'].includes(r) && e.etapa === 'visita') return `<div class="action wait"><h3>Visita con ${esc(nm(e.comercial))}</h3><p>${fDate(e.visita_fecha)} a las ${hhmm(e.visita_hora)}. Para cambiarla, reprograma aquí.</p>
+  if (['captacion', 'oficina'].includes(r) && e.etapa === 'visita') return `<div class="action wait"><h3>Visita con ${esc(nm(e.comercial))}</h3><p>${fDate(e.visita_fecha)} a las ${hhmm(e.visita_hora)}. Para cambiarla, reprograma aquí.</p>
     <div class="row"><label class="fl">Día<input type="date" id="agDia" value="${e.visita_fecha || today()}"></label><label class="fl">Hora<input type="time" id="agHora" value="${hhmm(e.visita_hora) || '10:00'}"></label><label class="fl">Comercial<select id="agCom">${comerciales().map(p => `<option value="${p.id}" ${p.id === e.comercial ? 'selected' : ''}>${esc(p.nombre)}</option>`).join('')}</select></label></div>
     <input type="hidden" id="agDir" value="${esc(c.calle || '')}"><div class="row"><button class="btn sm" data-act="agendar">Guardar cambio de visita</button><button class="btn ghost sm" data-act="descartar">Descartar</button></div></div>`;
-  if (['oficina', 'direccion'].includes(r) && e.etapa === 'solicitud') return `<div class="action"><h3>Ficha nueva de ${esc(nm(e.comercial))}</h3><p>Al aceptarla, el comercial ve que oficina ya la tiene.</p><button class="btn primary big" data-act="aceptar">Aceptar y empezar presupuesto</button></div>`;
-  if (['oficina', 'direccion'].includes(r) && ['preparacion', 'devuelta'].includes(e.etapa)) {
+  if (r === 'oficina' && e.etapa === 'solicitud') return `<div class="action"><h3>Ficha nueva de ${esc(nm(e.comercial))}</h3><p>Al aceptarla, el comercial ve que oficina ya la tiene.</p><button class="btn primary big" data-act="aceptar">Aceptar y empezar presupuesto</button></div>`;
+  if (r === 'oficina' && ['preparacion', 'devuelta'].includes(e.etapa)) {
     const t = tarifaDe(e); const dev = [...detail.eventos].reverse().find(x => ['devuelto', 'cambios'].includes(x.tipo));
     const th = e.ficha?.fv ? (t.miss ? `<p class="hint">Sin tarifa exacta para <b>${esc(t.txt)}</b>. Precio a criterio; dirección lo validará.</p>` : `<p class="hint">Tarifa: <b>${t.label}</b>${t.tri ? ' · trifásica' : ''} → <b>${eur(t.precio)}</b> IVA incl.</p>`) : `<p class="hint">Sin tarifa cargada para esta instalación. Pon el precio de Taclia.</p>`;
     return `<div class="action"><h3>${e.etapa === 'devuelta' ? 'Devuelta: corrige y vuelve a pasar' : 'Haz el presupuesto en Taclia y súbelo aquí'}</h3>
@@ -295,17 +313,24 @@ function actionBox(e) {
      <div><span class="tag">Propone oficina</span><div class="v">${eur(pr)}</div><span class="hint">${diff ? `${diff > 0 ? '+' : ''}${eur(diff)} vs tarifa` : tp != null ? 'Igual que tarifa' : ''}</span></div>
      <div><span class="tag">Base para financiera</span><div class="v">${eur(pr / 1.21, 2)}</div><span class="hint">Sin IVA</span></div></div>
      <label class="fl">Precio final al cliente (IVA incl.)<input type="number" id="precioFin" step="50" value="${pr || ''}"></label>
+     <label class="fl">Nota para oficina (opcional)<input type="text" id="notaAp" placeholder="Ej.: envíalo hoy mismo"></label>
+     <p class="hint">Al dar el visto bueno, el presupuesto vuelve a oficina para que lo envíe al cliente.</p>
      <div class="row"><button class="btn sun big" data-act="aprobar">Dar el visto bueno</button></div>
      <details><summary style="cursor:pointer;font-size:13.5px;color:var(--muted)">Devolver a oficina con un comentario</summary><div style="display:flex;flex-direction:column;gap:8px;margin-top:8px"><textarea id="motivo" placeholder="Ej.: pon el inversor de 8 kW"></textarea><button class="btn sm" data-act="devolver">Devolver a oficina</button></div></details></div>`;
   }
-  if (((r === 'comercial' && e.comercial === me.id) || ['oficina', 'direccion'].includes(r)) && e.etapa === 'enviado') return `<div class="action"><h3>Presupuesto aprobado: ${eur(e.presupuesto?.final)}</h3><p>Enséñale la propuesta al cliente y marca aquí su respuesta.</p>
+  if (r === 'oficina' && e.etapa === 'aprobado') return `<div class="action"><h3>Visto bueno: ${eur(e.presupuesto?.final)} · envíalo al cliente</h3>
+    ${(() => { const a = [...detail.eventos].reverse().find(x => x.tipo === 'aprobado'); return a?.comentario ? `<p>“${esc(a.comentario)}” — ${esc(nm(a.actor))}</p>` : ''; })()}
+    <div class="row"><button class="btn sm" data-act="propuesta" style="flex:0 0 auto">Ver propuesta para el cliente</button>${e.presupuesto?.pdf ? `<button class="btn sm" data-open-file="${esc(e.presupuesto.pdf)}" style="flex:0 0 auto">PDF de Taclia</button>` : ''}</div>
+    <div class="row"><label class="fl">Cómo lo has enviado<select id="envMedio"><option>Email</option><option>WhatsApp</option><option>En mano (comercial)</option><option>Correo postal</option></select></label><label class="fl">Nota (opcional)<input type="text" id="envNota" placeholder="Ej.: enviado a montse.ferrer@correo.es"></label></div>
+    <button class="btn primary big" data-act="enviar">Marcar como enviado al cliente</button></div>`;
+  if (((r === 'comercial' && e.comercial === me.id) || r === 'oficina') && e.etapa === 'enviado') return `<div class="action"><h3>Enviado al cliente: ${eur(e.presupuesto?.final)}</h3><p>Cuando el cliente conteste, marca aquí su respuesta.</p>
     <div class="row"><button class="btn sm" data-act="propuesta" style="flex:0 0 auto">Ver propuesta para el cliente</button></div>
     <div class="row"><label class="fl">Forma de pago<select id="pgForma"><option>Contado</option><option>Financiado</option><option>Mixto</option></select></label>
     <label class="fl">Plazo si financia<select id="pgPlazo"><option value="12">12 meses · 0%</option><option value="24">24 meses · 0% + 3,5%</option><option value="60">60 meses</option><option value="120" selected>120 meses</option></select></label></div>
     <label class="fl">Comentario (cambios o motivo)<input type="text" id="cliNota"></label>
     <div class="row"><button class="btn primary" data-act="acepta">Cliente acepta</button><button class="btn" data-act="cambios">Pide cambios</button><button class="btn ghost" data-act="rechaza">Rechaza</button></div></div>`;
   if (e.etapa === 'aceptado') return `<div class="action done"><h3>Venta cerrada · ${eur(e.presupuesto?.final)} · ${esc(e.pago?.forma || '')}</h3><p>Financiación, instalación y legalización se gestionarán aquí en la fase 2.</p></div>`;
-  return `<div class="action wait"><h3>${ST[e.etapa].t}</h3><p>${({ lead: 'Captación está contactando.', visita: `Visita con ${esc(nm(e.comercial))} el ${fDate(e.visita_fecha)}.`, solicitud: 'Oficina aún no la ha abierto.', preparacion: 'Oficina está haciendo el presupuesto.', devuelta: 'Dirección pidió un cambio a oficina.', aprobacion: 'Falta el visto bueno de dirección.', enviado: 'Esperando respuesta del cliente.', rechazado: 'Archivado con su historial.', descartado: 'Lead descartado.' })[e.etapa] || ''}</p></div>`;
+  return `<div class="action wait"><h3>${ST[e.etapa].t}</h3><p>${({ lead: 'Captación está contactando.', visita: `Visita con ${esc(nm(e.comercial))} el ${fDate(e.visita_fecha)}.`, solicitud: 'Oficina aún no la ha abierto.', preparacion: 'Oficina está haciendo el presupuesto.', devuelta: 'Dirección pidió un cambio a oficina.', aprobacion: 'Falta el visto bueno de dirección.', aprobado: 'Visto bueno dado. Oficina lo enviará al cliente.', enviado: 'Esperando respuesta del cliente.', rechazado: 'Archivado con su historial.', descartado: 'Lead descartado.' })[e.etapa] || ''}</p></div>`;
 }
 
 const SUBS = [['res', 'Resumen'], ['traz', 'Trazabilidad'], ['ficha', 'Ficha de visita'], ['pres', 'Presupuesto'], ['docs', 'Documentos']];
@@ -343,9 +368,11 @@ function tabTraz(e) {
   const A = lst('aceptada'); if (A) S.push({ rol: 'oficina', who: A.actor, what: 'Aceptó la ficha', w: A.created_at, done: true });
   const Pz = lst('presupuesto'); S.push({ rol: 'oficina', who: Pz?.actor || null, what: Pz ? Pz.detalle : 'Presupuesto pendiente', w: Pz?.created_at, done: !!Pz });
   const Ap = lst('aprobado'); S.push({ rol: 'direccion', who: Ap?.actor || null, what: Ap ? Ap.detalle : 'Visto bueno pendiente', w: Ap?.created_at, done: !!Ap });
-  const Vt = lst('venta'), Rc = lst('rechazo'); S.push({ rol: 'comercial', who: (Vt || Rc)?.actor || e.comercial, what: Vt ? `Cerró la venta · ${e.pago?.forma || ''}` : Rc ? 'El cliente rechazó' : 'Esperando respuesta del cliente', w: (Vt || Rc)?.created_at, done: !!Vt, bad: !!Rc });
-  const chain = `<ol class="chain">${S.map(s => `<li class="${s.done ? 'ok' : s.bad ? 'bad' : 'pend'}"><span class="av">${s.who ? ini(s.who) : '?'}</span><div><span class="tag">${ROLTXT[s.rol]}</span><b>${s.who ? esc(nm(s.who)) : 'Sin asignar'}</b><span class="what">${esc(s.what)}</span></div><span class="when">${s.w ? fWhen(s.w) : s.done ? '' : '—'}</span></li>`).join('')}</ol>`;
+  const En = lst('enviado'); S.push({ rol: 'oficina', who: En?.actor || null, what: En ? En.detalle : 'Envío al cliente pendiente', w: En?.created_at, done: !!En });
+  const Vt = lst('venta'), Rc = lst('rechazo'); S.push({ rol: 'comercial', who: (Vt || Rc)?.actor || e.comercial, what: Vt ? `Marcó la venta: el cliente acepta · ${e.pago?.forma || ''}` : Rc ? 'Marcó que el cliente rechaza' : 'Esperando respuesta del cliente', w: (Vt || Rc)?.created_at, done: !!Vt, bad: !!Rc });
+  const chain = `<ol class="chain">${S.map(s => `<li class="${s.done ? 'ok' : s.bad ? 'bad' : 'pend'}"><span class="av">${s.who ? ini(s.who) : '?'}</span><div><span class="tag">${ROLTXT[(s.who && P(s.who)?.rol) || s.rol]}</span><b>${s.who ? esc(nm(s.who)) : 'Sin asignar'}</b><span class="what">${esc(s.what)}</span></div><span class="when">${s.w ? fWhen(s.w) : s.done ? '' : '—'}</span></li>`).join('')}</ol>`;
   return `<p class="hint" style="margin:0 0 12px">Se registra en el servidor: cada paso guarda quién lo hizo y cuándo. Nadie puede editarlo ni borrarlo, tampoco el administrador.</p>${chain}
+  ${(() => { const cs = CORR.filter(c => c.expediente_id === e.id); return cs.length ? `<div class="sec"><h4>Correcciones de dirección (${cs.length})</h4><ol class="tl">${cs.map(c => `<li><span class="t">${fWhen(c.created_at)} · ${esc(nm(c.actor))} → ${esc(nm(c.para))}</span><br>“${esc(c.comentario)}” <span class="pill ${c.done ? 'p-ok' : 'p-bad'}">${c.done ? 'Hecha ' + fWhen(c.done.created_at) : 'Pendiente'}</span>${c.done?.comentario ? `<span class="c">${esc(c.done.comentario)}</span>` : ''}</li>`).join('')}</ol></div>` : ''; })()}
   <div class="sec"><h4>Registro completo (${ev.length})</h4><ol class="tl">${ev.map(x => `<li><span class="t">${fWhen(x.created_at)} · ${esc(nm(x.actor))}</span><br>${esc(x.detalle)}${x.comentario ? `<span class="c">“${esc(x.comentario)}”</span>` : ''}</li>`).join('')}</ol></div>`;
 }
 function tabFicha(e) {
@@ -494,7 +521,10 @@ async function act(a, el) {
         await rpc('subir_presupuesto', { p_exp: e.id, p_taclia: v('tacliaNo'), p_precio: +v('precioProp') || null, p_pdf_path: path });
         toast('Pasado a dirección.'); break;
       }
-      case 'aprobar': await rpc('aprobar_presupuesto', { p_exp: e.id, p_precio: +v('precioFin') || null }); toast('Visto bueno dado. El comercial ya puede enseñarlo.'); sub = 'pres'; break;
+      case 'aprobar': await rpc('aprobar_presupuesto', { p_exp: e.id, p_precio: +v('precioFin') || null, p_nota: v('notaAp') }); toast('Visto bueno dado. Oficina lo enviará al cliente.'); break;
+      case 'enviar': await rpc('enviar_al_cliente', { p_exp: e.id, p_medio: v('envMedio'), p_nota: v('envNota') }); toast('Marcado como enviado. El comercial lo ve.'); break;
+      case 'corregir': await rpc('indicar_correccion', { p_exp: e.id, p_para: v('corPara'), p_texto: v('corTxt') }); toast(`Corrección enviada a ${nm(v('corPara'))}.`); break;
+      case 'resolver': await rpc('resolver_correccion', { p_evento: +el.dataset.cid, p_nota: v('resNota-' + el.dataset.cid) }); toast('Corrección marcada como hecha. Dirección lo ve.'); break;
       case 'devolver': await rpc('devolver_presupuesto', { p_exp: e.id, p_motivo: v('motivo') }); toast('Devuelto a oficina.'); break;
       case 'acepta': await rpc('respuesta_cliente', { p_exp: e.id, p_resultado: 'acepta', p_forma: v('pgForma'), p_plazo: +v('pgPlazo'), p_nota: v('cliNota') }); toast('¡Venta cerrada!'); break;
       case 'cambios': await rpc('respuesta_cliente', { p_exp: e.id, p_resultado: 'cambios', p_nota: v('cliNota') }); toast('Vuelve a oficina con el cambio.'); break;
@@ -605,11 +635,11 @@ function showCreds(nombre, email, pass) {
 
 /* ---------- tarifas ---------- */
 function renderTarifas() {
-  const ed = role() === 'direccion'; let g = '';
+  const ed = role() === 'oficina'; let g = '';
   const rows = tarifas.map(r => { let h = ''; if (r.grupo !== g) { g = r.grupo; h = `<tr class="grp"><td colspan="4">${esc(r.grupo)} · legalización y certificados incluidos</td></tr>`; }
     const cell = (k, val) => ed ? `<input type="number" step="50" data-tar="${r.id}" data-k="${k}" value="${val ?? ''}" style="max-width:120px;text-align:right">` : (val != null ? eur(val) : '—');
     return h + `<tr><td>${r.placas} PL + INV ${r.inversor_kw} kW${+r.bateria_kwh ? ` + BAT ${r.bateria_kwh} kWh` : ''}</td><td class="num">${cell('pvp_mono', r.pvp_mono)}</td><td class="num">${cell('pvp_tri', r.pvp_tri)}</td><td class="num">${eur(r.pvp_mono / 1.21, 2)}</td></tr>`; }).join('');
-  $('main').innerHTML = `<section class="panel page"><div class="page-h"><div><p>${ed ? 'Puedes cambiar los precios: se guardan al salir de la casilla y se aplican a las sugerencias de oficina.' : 'El precio sugerido de cada expediente sale de esta tabla.'}</p></div></div>
+  $('main').innerHTML = `<section class="panel page"><div class="page-h"><div><p>${ed ? 'Puedes cambiar los precios: se guardan al salir de la casilla y cada cambio queda registrado para dirección.' : 'El precio sugerido de cada expediente sale de esta tabla. Los cambios los hace oficina y quedan registrados.'}</p></div></div>
    <div class="tblw"><table class="t"><thead><tr><th>Instalación</th><th style="text-align:right">PVP monofásica</th><th style="text-align:right">PVP trifásica</th><th style="text-align:right">Sin IVA (financiera)</th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="empty">Sin tarifas.</td></tr>'}</tbody></table></div></section>`;
 }
 
@@ -621,7 +651,7 @@ async function renderVentas() {
   const ventas = E.filter(e => e.etapa === 'aceptado');
   let evs = [];
   if (ventas.length) {
-    const { data, error } = await sb.from('eventos').select('expediente_id,actor,tipo,created_at').in('expediente_id', ventas.map(e => e.id)).in('tipo', ['visita', 'ficha', 'aceptada', 'presupuesto', 'aprobado', 'venta']).order('id');
+    const { data, error } = await sb.from('eventos').select('expediente_id,actor,tipo,created_at').in('expediente_id', ventas.map(e => e.id)).in('tipo', ['visita', 'ficha', 'aceptada', 'presupuesto', 'aprobado', 'enviado', 'venta']).order('id');
     if (error) { toast(errMsg(error)); return; }
     evs = data || [];
   }
@@ -630,11 +660,11 @@ async function renderVentas() {
     const v = last(e.id, 'venta');
     return { e, fecha: v?.created_at || e.updated_at, importe: +e.presupuesto?.final || 0, pago: e.pago?.forma || '',
       capto: e.captador || null, agendo: last(e.id, 'visita')?.actor || null, comercial: e.comercial || null,
-      oficina: last(e.id, 'presupuesto')?.actor || null, aprobo: last(e.id, 'aprobado')?.actor || null, cerro: v?.actor || null };
+      oficina: last(e.id, 'presupuesto')?.actor || null, aprobo: last(e.id, 'aprobado')?.actor || null, envio: last(e.id, 'enviado')?.actor || null, cerro: v?.actor || null };
   }).sort((a, b) => String(b.fecha).localeCompare(String(a.fecha)));
   const meses = [...new Set(ventRows.map(r => String(r.fecha).slice(0, 7)))].sort().reverse();
   const mesTxt = m => new Date(m + '-15').toLocaleDateString('es-ES', { month: 'long', year: 'numeric' });
-  const ROLES_V = [['capto', 'Captó'], ['agendo', 'Agendó'], ['comercial', 'Comercial'], ['oficina', 'Presupuesto'], ['aprobo', 'Aprobó'], ['cerro', 'Cerró']];
+  const ROLES_V = [['capto', 'Captó'], ['agendo', 'Agendó'], ['comercial', 'Comercial'], ['oficina', 'Presupuesto'], ['aprobo', 'Visto bueno'], ['envio', 'Envió'], ['cerro', 'Marcó la venta']];
   let rows = ventRows.filter(r => ventMes === 'all' || String(r.fecha).startsWith(ventMes));
   if (ventWho !== 'all') rows = rows.filter(r => ROLES_V.some(([k]) => r[k] === ventWho));
   const total = rows.reduce((s, r) => s + r.importe, 0);
@@ -663,6 +693,16 @@ async function renderVentas() {
   };
 }
 
+
+/* ---------- correcciones (dirección) ---------- */
+function renderCorr() {
+  const byId = Object.fromEntries(E.map(e => [e.id, e]));
+  const l = [...CORR].sort((a, b) => (!!a.done - !!b.done) || b.id - a.id);
+  $('main').innerHTML = `<section class="panel page"><div class="page-h"><div><h3 class="h3">Correcciones indicadas</h3><p>Cada corrección le aparece como tarea a la persona hasta que la marca como hecha. Se indican desde cada expediente.</p></div></div>
+   ${l.length ? `<div class="tblw"><table class="t"><thead><tr><th>Cuándo</th><th>Para</th><th>Cliente</th><th>Corrección</th><th>Estado</th></tr></thead><tbody>
+   ${l.map(c => `<tr><td style="white-space:nowrap">${fWhen(c.created_at)}</td><td><b>${esc(nm(c.para))}</b></td><td>${byId[c.expediente_id] ? `<button type="button" class="lnk" data-tz="${c.expediente_id}">${esc(byId[c.expediente_id].cliente?.nombre)}</button>` : '#' + c.expediente_id}</td><td>${esc(c.comentario)}${c.done?.comentario ? `<br><span class="hint">Respuesta: “${esc(c.done.comentario)}”</span>` : ''}</td><td><span class="pill ${c.done ? 'p-ok' : 'p-bad'}">${c.done ? 'Hecha · ' + fWhen(c.done.created_at) : 'Pendiente'}</span></td></tr>`).join('')}</tbody></table></div>` : `<div class="empty">Todavía no has indicado ninguna corrección.</div>`}</section>`;
+}
+
 /* ---------- eventos de la interfaz ---------- */
 document.addEventListener('click', async ev => {
   const t = ev.target;
@@ -688,7 +728,7 @@ document.addEventListener('click', async ev => {
 });
 document.addEventListener('change', async ev => {
   const ur = ev.target.closest('[data-urol]'); if (ur) { const r = await fnUsuarios({ accion: 'actualizar', id: ur.dataset.urol, rol: ur.value }); if (r.error) toast(r.error, 5000); else toast('Rol cambiado. Queda registrado.'); await loadAll(); return renderEquipo(); }
-  const tr = ev.target.closest('[data-tar]'); if (tr) { const val = tr.value === '' ? null : +tr.value; const { error } = await sb.from('tarifas').update({ [tr.dataset.k]: val }).eq('id', +tr.dataset.tar); if (error) toast(errMsg(error), 5000); else { toast('Precio guardado.'); const x = tarifas.find(r => r.id === +tr.dataset.tar); if (x) x[tr.dataset.k] = val; } return; }
+  const tr = ev.target.closest('[data-tar]'); if (tr) { const val = tr.value === '' ? null : +tr.value; const { error } = await sb.rpc('actualizar_tarifa', { p_id: +tr.dataset.tar, p_campo: tr.dataset.k, p_valor: val }); if (error) toast(errMsg(error), 5000); else { toast('Precio guardado. Queda registrado.'); const x = tarifas.find(r => r.id === +tr.dataset.tar); if (x) x[tr.dataset.k] = val; } return; }
 });
 document.addEventListener('keydown', ev => { if (ev.key === 'Escape') $('modalSlot').innerHTML = ''; });
 sb.auth.onAuthStateChange((evt) => { if (evt === 'SIGNED_OUT' && me) { me = null; showAccess(); } });
