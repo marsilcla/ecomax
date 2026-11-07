@@ -1,6 +1,6 @@
 // Ecomax Equipo · carga rápida y pantalla sin conexión. Los datos siempre vienen del servidor.
-const CACHE='ecomax-equipo-real-v4';
-const SHELL=['./','./index.html','./style.css','./app.js','./config.js','./manifest.webmanifest','./icons/logo.png','./icons/icon-192.png','./icons/icon-512.png','./icons/apple-touch-icon.png'];
+const CACHE='ecomax-equipo-real-v5';
+const SHELL=['./','./index.html','./style.css','./app.js','./config.js','./manifest.webmanifest','./icons/logo.png','./icons/icon-192.png?v=2','./icons/icon-512.png?v=2','./icons/apple-touch-icon.png?v=2'];
 self.addEventListener('install',e=>{e.waitUntil(caches.open(CACHE).then(c=>c.addAll(SHELL)).then(()=>self.skipWaiting()))});
 self.addEventListener('activate',e=>{e.waitUntil(caches.keys().then(k=>Promise.all(k.filter(x=>x!==CACHE).map(x=>caches.delete(x)))).then(()=>self.clients.claim()))});
 self.addEventListener('fetch',e=>{
