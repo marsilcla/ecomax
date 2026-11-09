@@ -345,3 +345,8 @@ table.t .grp td{background:var(--info-soft);font-weight:600;font-size:12.5px;col
 .imp{display:flex;flex-direction:column;gap:12px}.impmap{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px}
 .impres{display:flex;gap:6px;flex-wrap:wrap}.tblwrap{overflow-x:auto;-webkit-overflow-scrolling:touch}.imp-t td,.imp-t th{white-space:nowrap}.imp-t tr.st-bad td,.imp-t tr.st-mute td{color:var(--muted)}
 .ok{color:var(--ok)}
+
+/* contraseña con botón Ver */
+.pwrap{display:flex;gap:6px;align-items:stretch}
+.pwrap input{flex:1 1 auto}
+.pwrap .pweye{flex:0 0 auto;min-width:74px}

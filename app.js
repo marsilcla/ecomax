@@ -209,7 +209,7 @@ function renderLogin() {
   $('main').innerHTML = loginShell(`<p class="hint">Entra con tu email y tu contraseña.</p>
    <form id="fLogin" class="f" novalidate>
     <label class="fl">Email<input type="email" id="lgEmail" autocomplete="username" autocapitalize="none" inputmode="email"></label>
-    <label class="fl">Contraseña<input type="password" id="lgPass" autocomplete="current-password"></label>
+    <label class="fl">Contraseña<span class="pwrap"><input type="password" id="lgPass" autocomplete="current-password"><button type="button" class="btn sm pweye" data-pw="lgPass">Ver</button></span></label>
     <span class="err hide" id="lgErr"></span>
     <button class="btn primary big" type="submit">Entrar</button></form>
    <p class="hint">¿No tienes acceso o has olvidado la contraseña? Pídeselo al administrador de tu empresa.</p>`);
@@ -248,12 +248,42 @@ async function afterLogin(user) {
   const { data: p, error } = await sb.from('profiles').select('*').eq('id', user.id).maybeSingle();
   if (error || !p || !p.activo) { await sb.auth.signOut(); toast('Tu usuario no está activo. Habla con tu administrador.', 5000); return showAccess(); }
   me = p;
-  const { data: em } = await sb.from('empresas').select('*').eq('id', p.empresa_id).maybeSingle(); empresa = em;
+  if (p.debe_cambiar) return renderCambiarPass(true);
+  await entrar();
+}
+async function entrar() {
+  const { data: em } = await sb.from('empresas').select('*').eq('id', me.empresa_id).maybeSingle(); empresa = em;
   await loadAll();
   view = null; sel = null; mode = 'view'; AVFRESH = new Set();
   checkAvisos();
   subscribe();
   render();
+}
+function pwField(id, label, ac) { return `<label class="fl">${label}<span class="pwrap"><input type="password" id="${id}" autocomplete="${ac}"><button type="button" class="btn sm pweye" data-pw="${id}">Ver</button></span></label>`; }
+function renderCambiarPass(forzado) {
+  const html = `<p class="hint">${forzado ? `Hola, ${esc(me.nombre.split(' ')[0])}. Es la primera vez que entras (o te han dado una contraseña temporal). Pon una contraseña tuya para seguir: solo la sabrás tú.` : 'Pon tu nueva contraseña. La próxima vez que entres, en este o en otro dispositivo, usa la nueva.'}</p>
+   <form id="fPass" class="f" novalidate>
+    ${pwField('npA', 'Nueva contraseña (mínimo 8)', 'new-password')}
+    ${pwField('npB', 'Repite la nueva contraseña', 'new-password')}
+    <span class="err hide" id="npErr"></span>
+    <button class="btn primary big" type="submit">Guardar contraseña${forzado ? ' y entrar' : ''}</button></form>
+   ${forzado ? '<p class="hint"><button type="button" class="lnk" data-go="salir">Salir</button></p>' : ''}`;
+  if (forzado) { renderTop(); $('who').innerHTML = ''; $('main').innerHTML = loginShell(html); }
+  else $('main').innerHTML = `<section class="panel page" style="max-width:520px">${html}</section>`;
+  $('fPass').addEventListener('submit', async ev => {
+    ev.preventDefault(); const b = ev.submitter, err = m => { $('npErr').textContent = m; $('npErr').classList.remove('hide'); };
+    const a = $('npA').value, c = $('npB').value;
+    if (a.length < 8) return err('Tiene que tener al menos 8 caracteres.');
+    if (a !== c) return err('Las dos contraseñas no coinciden.');
+    busy(b, true);
+    const { error } = await sb.auth.updateUser({ password: a });
+    if (error) { busy(b, false); const m = String(error.message || ''); return err(/different|same/i.test(m) ? 'Tiene que ser distinta de la que tenías.' : /weak|short|characters/i.test(m) ? 'Es demasiado fácil. Prueba con una más larga o con números.' : 'No se ha podido guardar. Inténtalo otra vez.'); }
+    await sb.rpc('contrasena_cambiada');
+    busy(b, false); me.debe_cambiar = false;
+    toast('Contraseña guardada.');
+    if (forzado) return entrar();
+    view = null; render();
+  });
 }
 async function logout() { try { await sb.removeAllChannels(); } catch (e) { } await sb.auth.signOut(); me = null; E = []; team = []; view = null; showAccess(); }
 
@@ -354,7 +384,7 @@ function onRemote() {
 }
 
 /* ---------- cabecera y menú ---------- */
-const VIEWT = { importar: 'Importar leads de Excel', corr: 'Correcciones', ventas: 'Quién interviene', leads: 'Leads', agenda: 'Agenda', exp: 'Expedientes', act: 'Actividad del equipo', equipo: 'Equipo', tarifas: 'Tarifas' };
+const VIEWT = { cuenta: 'Mi contraseña', importar: 'Importar leads de Excel', corr: 'Correcciones', ventas: 'Quién interviene', leads: 'Leads', agenda: 'Agenda', exp: 'Expedientes', act: 'Actividad del equipo', equipo: 'Equipo', tarifas: 'Tarifas' };
 function renderTop() {
   const hd = document.querySelector('header.top'); hd.hidden = !me;
   if (!me) { $('who').innerHTML = ''; $('crumb').innerHTML = ''; return; }
@@ -370,6 +400,7 @@ function menuItems() {
   if (r === 'direccion') { it.push(['exp', 'Expedientes', 'Visto bueno y revisión de todo', pend]); it.push(['corr', 'Correcciones', 'Las que has indicado y si están hechas', CORR.filter(c => !c.done).length]); it.push(['ventas', 'Quién interviene', 'Ventas cerradas y quién hizo cada paso', 0]); it.push(['act', 'Actividad del equipo', 'Quién ha hecho qué y cuándo', 0]); it.push(['agenda', 'Agenda', 'Visitas de comerciales', 0]); }
   if (['captacion', 'comercial', 'oficina', 'direccion'].includes(r)) it.push(['tarifas', 'Tarifas', r === 'oficina' ? 'Ver y cambiar precios' : 'Precios y cuotas', 0]);
   if (me.admin) it.push(['equipo', 'Equipo', 'Altas, roles y contraseñas', 0]);
+  it.push(['cuenta', 'Mi contraseña', 'Cambiar tu contraseña', 0]);
   return it;
 }
 function go(k) {
@@ -384,7 +415,7 @@ function go(k) {
 function renderMenu() {
   const r = role();
   if (['instalador', 'comparativas'].includes(r)) {
-    $('main').innerHTML = `<div class="hello"><h1>Hola, ${esc(me.nombre.split(' ')[0])}</h1><p>Tu apartado (${r === 'instalador' ? 'instalaciones' : 'comparativas de luz y gas'}) llega en la próxima fase. Ya tienes tu usuario creado.</p></div>`; return;
+    $('main').innerHTML = `<div class="hello"><h1>Hola, ${esc(me.nombre.split(' ')[0])}</h1><p>Tu apartado (${r === 'instalador' ? 'instalaciones' : 'comparativas de luz y gas'}) llega en la próxima fase. Ya tienes tu usuario creado.</p></div><div class="home"><section><h2 class="h-sec">Más</h2><div class="more"><button type="button" class="mini" data-go="cuenta"><b>Mi contraseña</b><span class="hint">Cambiar tu contraseña</span></button></div></section></div>`; return;
   }
   const tasks = E.filter(needsMe).sort((a, b) => ST[a.etapa].k - ST[b.etapa].k || a.id - b.id);
   const corrs = myCorr(); const byId = Object.fromEntries(E.map(e => [e.id, e]));
@@ -406,7 +437,7 @@ async function render(showDetail, soft) {
   if (!me) return;
   if (!view) return renderMenu();
   if (['exp', 'leads'].includes(view)) return renderGrid(showDetail, soft);
-  ({ agenda: renderAgenda, act: renderAct, ventas: renderVentas, corr: renderCorr, equipo: renderEquipo, tarifas: renderTarifas, importar: renderImport })[view]();
+  ({ agenda: renderAgenda, act: renderAct, ventas: renderVentas, corr: renderCorr, equipo: renderEquipo, tarifas: renderTarifas, importar: renderImport, cuenta: () => renderCambiarPass(false) })[view]();
 }
 
 /* ---------- lista + expediente ---------- */
@@ -849,8 +880,8 @@ async function fnUsuarios(body) {
 }
 function showCreds(nombre, email, pass) {
   $('modalSlot').innerHTML = `<div class="modal" data-act="closeModal"><div class="modal-bar"><span></span><button class="btn sm" data-act="closeModal">Cerrar</button></div>
-   <article class="doc" style="max-width:460px;padding:22px"><h3 style="margin:0 0 6px;font-family:var(--f-display)">Acceso de ${esc(nombre)}</h3><p style="margin:0 0 12px;color:#43507a">Pásale estos datos. Puede entrar ya desde el enlace de la app.</p>
-   <div class="note" id="credTxt" style="background:#eef2fb;color:#14204a">Email: ${esc(email)}\nContraseña: ${esc(pass)}</div>
+   <article class="doc" style="max-width:460px;padding:22px"><h3 style="margin:0 0 6px;font-family:var(--f-display)">Acceso de ${esc(nombre)}</h3><p style="margin:0 0 12px;color:#43507a">Pásale estos datos. Puede entrar ya desde el enlace de la app. La primera vez que entre le pedirá que ponga su propia contraseña.</p>
+   <div class="note" id="credTxt" style="background:#eef2fb;color:#14204a">App: ${esc(location.origin + location.pathname)}\nEmail: ${esc(email)}\nContraseña temporal: ${esc(pass)}</div>
    <div class="row" style="margin-top:12px"><button class="btn primary" data-copy="credTxt">Copiar</button></div></article></div>`;
 }
 
@@ -927,6 +958,7 @@ function renderCorr() {
 /* ---------- eventos de la interfaz ---------- */
 document.addEventListener('click', async ev => {
   const t = ev.target;
+  const pw = t.closest('[data-pw]'); if (pw) { const i = $(pw.dataset.pw); if (i) { const v = i.type === 'password'; i.type = v ? 'text' : 'password'; pw.textContent = v ? 'Ocultar' : 'Ver'; } return; }
   const g = t.closest('[data-go]'); if (g) return go(g.dataset.go);
   const tk = t.closest('[data-task]'); if (tk) return openExp(+tk.dataset.task);
   const ft = t.closest('[data-filt]'); if (ft) { filt = ft.dataset.filt; sel = null; return renderGrid(); }
