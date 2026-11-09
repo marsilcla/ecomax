@@ -1,7 +1,11 @@
 Ecomax Equipo
 
-Raíz: la app real, conectada al servidor (Supabase, región UE).
-/demo/: la demo con datos de ejemplo, para enseñar sin tocar datos reales.
+Raíz: la app real. Es la misma app que la demo, conectada al servidor
+(Supabase, región UE): cada persona entra con su email y contraseña, todo el
+equipo comparte los expedientes en tiempo real y los documentos se guardan en
+la nube.
+/demo/: la demo con datos de ejemplo (usuario + 1234), para enseñar sin tocar
+datos reales.
 
 Primera vez: al abrir la app real aparece "Configurar" para crear el usuario
 administrador. Después, el administrador da de alta al equipo desde "Equipo".
