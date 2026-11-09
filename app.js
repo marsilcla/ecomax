@@ -50,8 +50,55 @@ async function loadAll() {
   const ev = co.data || [], hechas = {};
   ev.filter(x => x.tipo === 'correccion_hecha').forEach(x => { hechas[x.datos?.ref] = x; });
   CORR = ev.filter(x => x.tipo === 'correccion').map(x => ({ ...x, para: x.datos?.para, done: hechas[x.id] || null }));
+  await loadAvisos();
 }
 const myCorr = () => CORR.filter(c => !c.done && c.para === me?.id);
+/* ---------- avisos con sonido (suenan entre móviles mientras la app está abierta) ---------- */
+let AVISOS = [], AVFRESH = new Set(), AC = null;
+const AV_TIPOS = ['correccion', 'ficha', 'venta', 'rechazo', 'reasignado'];
+function avisoDe(ev) {
+  if (!me || !ev || ev.actor === me.id) return null;
+  const e = E.find(x => x.id === ev.expediente_id);
+  if (ev.tipo === 'correccion' && ev.datos?.para === me.id) return { t: `Corrección de ${nm(ev.actor)}`, c: 'p-bad' };
+  if (role() === 'captacion' && e && e.captador === me.id) {
+    if (ev.tipo === 'ficha') return { t: 'Visita hecha · ficha enviada', c: 'p-info' };
+    if (ev.tipo === 'venta') return { t: 'Venta cerrada', c: 'p-done' };
+    if (ev.tipo === 'rechazo') return { t: 'El cliente no acepta', c: 'p-mute' };
+    if (ev.tipo === 'reasignado') return { t: 'Visita reasignada a otro comercial', c: 'p-info' };
+  }
+  return null;
+}
+async function loadAvisos() {
+  const desde = new Date(Date.now() - 30 * 864e5).toISOString();
+  const { data } = await sb.from('eventos').select('id,expediente_id,actor,tipo,detalle,comentario,datos,created_at').in('tipo', AV_TIPOS).gte('created_at', desde).order('id', { ascending: false }).limit(300);
+  AVISOS = (data || []).map(ev => ({ ev, a: avisoDe(ev) })).filter(x => x.a);
+}
+const avKey = () => `ecomax-avisos-${me?.id}`;
+function avMarcar(id) { try { localStorage.setItem(avKey(), String(id)); } catch (e) { } }
+function unlockAudio() { try { AC = AC || new (window.AudioContext || window.webkitAudioContext)(); if (AC.state === 'suspended') AC.resume(); } catch (e) { } }
+document.addEventListener('pointerdown', unlockAudio, true); document.addEventListener('keydown', unlockAudio, true);
+function ding() {
+  try { unlockAudio(); if (AC) { const t = AC.currentTime + .02; [[880, 0], [1318.5, .17]].forEach(([f, d]) => { const o = AC.createOscillator(), g = AC.createGain(); o.type = 'sine'; o.frequency.value = f; g.gain.setValueAtTime(.0001, t + d); g.gain.exponentialRampToValueAtTime(.4, t + d + .02); g.gain.exponentialRampToValueAtTime(.0001, t + d + .7); o.connect(g); g.connect(AC.destination); o.start(t + d); o.stop(t + d + .75); }); } } catch (e) { }
+  try { navigator.vibrate?.([180, 90, 180]); } catch (e) { }
+}
+// devuelve cuántos avisos nuevos ha habido (y suena si hay alguno)
+function checkAvisos() {
+  let raw = null; try { raw = localStorage.getItem(avKey()); } catch (e) { }
+  const maxId = AVISOS[0]?.ev.id || 0;
+  if (raw === null) { avMarcar(maxId); return 0; } // primera vez en este móvil: el historial no suena
+  const visto = +raw || 0, nuevos = AVISOS.filter(x => x.ev.id > visto);
+  if (!nuevos.length) return 0;
+  nuevos.forEach(x => AVFRESH.add(x.ev.id)); avMarcar(maxId); ding();
+  const byId = Object.fromEntries(E.map(e => [e.id, e]));
+  toast(nuevos.length === 1 ? `🔔 ${nuevos[0].a.t} · ${byId[nuevos[0].ev.expediente_id]?.cliente?.nombre || ''}` : `🔔 Tienes ${nuevos.length} avisos nuevos`, 4000);
+  return nuevos.length;
+}
+function avisosHTML() {
+  if (!AVISOS.length) return '';
+  const byId = Object.fromEntries(E.map(e => [e.id, e]));
+  return `<section><h2 class="h-sec">Avisos</h2><div class="avisos">${AVISOS.slice(0, 8).map(({ ev, a }) => `<button type="button" class="aviso${AVFRESH.has(ev.id) ? ' fresh' : ''}" data-open="${ev.expediente_id}"><span class="pill ${a.c}">${esc(a.t)}</span><b>${esc(byId[ev.expediente_id]?.cliente?.nombre || '#' + ev.expediente_id)}</b><span class="hint">${AVFRESH.has(ev.id) ? '<span class="nuevo">Nuevo</span> ' : ''}${esc(fDateTime(ev.created_at))}${ev.comentario ? ' · “' + esc(ev.comentario.slice(0, 80)) + '”' : ''}</span></button>`).join('')}</div></section>`;
+}
+const fDateTime = iso => { try { const d = new Date(iso); return d.toLocaleDateString('es-ES', { day: '2-digit', month: 'short' }) + ' ' + d.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' }); } catch (e) { return ''; } };
 async function loadDetail(id) {
   const [ev, ar] = await Promise.all([
     sb.from('eventos').select('*').eq('expediente_id', id).order('id'),
@@ -203,11 +250,84 @@ async function afterLogin(user) {
   me = p;
   const { data: em } = await sb.from('empresas').select('*').eq('id', p.empresa_id).maybeSingle(); empresa = em;
   await loadAll();
-  view = null; sel = null; mode = 'view';
+  view = null; sel = null; mode = 'view'; AVFRESH = new Set();
+  checkAvisos();
   subscribe();
   render();
 }
 async function logout() { try { await sb.removeAllChannels(); } catch (e) { } await sb.auth.signOut(); me = null; E = []; team = []; view = null; showAccess(); }
+
+/* ---------- importar leads desde Excel o CSV ---------- */
+let IMP = null, _xlsx = null;
+const IMP_CAMPOS = [['nombre', 'Nombre *', /nombre|cliente|name|contacto/i], ['tel', 'Teléfono *', /tel|m[oó]vil|phone|celular/i], ['email', 'Email', /e-?mail|correo/i], ['calle', 'Dirección', /direcci|calle|domicilio|address/i], ['pueblo', 'Población', /poblaci|municipio|localidad|ciudad|pueblo|city/i], ['comarca', 'Comarca o provincia', /comarca|provincia/i], ['interes', 'Interés', /inter[eé]s|producto|servicio|placas|instalaci/i], ['nota', 'Nota', /nota|observ|coment|detalle/i]];
+function loadXLSX() { if (window.XLSX) return Promise.resolve(window.XLSX); if (_xlsx) return _xlsx; _xlsx = new Promise((res, rej) => { const sc = document.createElement('script'); sc.src = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js'; sc.onload = () => window.XLSX ? res(window.XLSX) : rej(new Error('lector')); sc.onerror = () => { _xlsx = null; rej(new Error('No se ha podido cargar el lector de Excel. Revisa la conexión.')); }; document.head.appendChild(sc); }); return _xlsx; }
+function renderImport() {
+  if (!['captacion', 'oficina'].includes(role())) { $('main').innerHTML = `<div class="empty panel">Solo captación y oficina pueden importar leads.</div>`; return; }
+  $('main').innerHTML = `<section class="panel page"><div class="page-h"><div><p>Sube el Excel (o CSV) con los leads. Indica qué columna es cada dato, revisa la lista y pulsa Importar. Los clientes que ya existen se saltan solos.</p></div></div>
+   <div class="f imp"><label class="fl">Archivo (.xlsx, .xls o .csv)<input type="file" id="xlsIn" accept=".xlsx,.xls,.csv,.ods"></label>
+   <label class="fl">Origen (aparece en cada lead)<input type="text" id="xlsOr" value="Empresa externa"></label>
+   <div id="xlsBody">${IMP ? '' : '<p class="hint">Todavía no has elegido archivo.</p>'}</div></div></section>`;
+  if (IMP) impRender();
+}
+async function impLeer(file) {
+  const box = $('xlsBody'); box.innerHTML = '<p class="hint">Leyendo el archivo…</p>';
+  try {
+    const X = await loadXLSX(); const wb = X.read(new Uint8Array(await file.arrayBuffer()), { type: 'array' });
+    const ws = wb.Sheets[wb.SheetNames[0]]; const rows = X.utils.sheet_to_json(ws, { header: 1, raw: false, defval: '' }).map(r => r.map(c => String(c ?? '').trim()));
+    const hi = rows.findIndex(r => r.filter(Boolean).length >= 2); if (hi < 0) throw new Error('No encuentro datos en la primera hoja.');
+    const head = rows[hi].map((h, i) => h || `Columna ${i + 1}`), data = rows.slice(hi + 1).filter(r => r.some(Boolean));
+    const map = {}; IMP_CAMPOS.forEach(([k, , re]) => { const i = head.findIndex((h, j) => re.test(h) && !Object.values(map).includes(j)); map[k] = i; });
+    IMP = { nombre: file.name, head, data, map, existe: null, hecho: null };
+    await impDuplicados(); impRender();
+  } catch (e) { IMP = null; box.innerHTML = `<p class="err">${esc(e.message || e)}</p>`; }
+}
+function impFilas() {
+  const m = IMP.map, g = (r, k) => m[k] >= 0 ? String(r[m[k]] ?? '').trim() : '', vistos = new Set();
+  return IMP.data.map(r => {
+    const c = { nombre: g(r, 'nombre'), tel: g(r, 'tel'), email: g(r, 'email'), calle: g(r, 'calle'), pueblo: g(r, 'pueblo'), comarca: g(r, 'comarca') };
+    const interes = g(r, 'interes'), nota = g(r, 'nota'), tk = telKey(c.tel), mk = mailKey(c.email);
+    let est = 'ok', txt = 'Se importa';
+    if (!c.nombre || !tk) { est = 'bad'; txt = 'Falta nombre o teléfono'; }
+    else if (vistos.has(tk)) { est = 'mute'; txt = 'Repetido en el Excel'; }
+    else if (IMP.existe && (IMP.existe.has(tk) || (mk && IMP.existe.has(mk)))) { est = 'mute'; txt = 'Ya existe en la app'; }
+    if (tk) vistos.add(tk);
+    return { c, interes, nota, est, txt };
+  });
+}
+async function impDuplicados() {
+  const m = IMP.map; const tels = [...new Set(IMP.data.map(r => telKey(m.tel >= 0 ? r[m.tel] : '')).filter(Boolean))], mails = [...new Set(IMP.data.map(r => mailKey(m.email >= 0 ? r[m.email] : '')).filter(Boolean))];
+  IMP.existe = new Set();
+  for (let i = 0; i < Math.max(tels.length, mails.length); i += 400) {
+    try { (await rpc('buscar_duplicados', { p_tels: tels.slice(i, i + 400), p_emails: mails.slice(i, i + 400) }) || []).forEach(d => IMP.existe.add(d.clave)); } catch (e) { }
+  }
+}
+function impRender() {
+  const box = $('xlsBody'); if (!box || !IMP) return;
+  const filas = impFilas(), ok = filas.filter(f => f.est === 'ok').length, opts = sel => `<option value="-1">(ninguna)</option>` + IMP.head.map((h, i) => `<option value="${i}" ${i === sel ? 'selected' : ''}>${esc(h)}</option>`).join('');
+  box.innerHTML = `<p class="hint"><b>${esc(IMP.nombre)}</b> · ${IMP.data.length} filas</p>
+   <h4 class="h-sec" style="margin-top:6px">Qué columna es cada dato</h4><div class="impmap">${IMP_CAMPOS.map(([k, t]) => `<label class="fl">${t}<select data-imp="${k}">${opts(IMP.map[k])}</select></label>`).join('')}</div>
+   <div class="impres"><span class="pill p-done">${ok} se importan</span><span class="pill p-mute">${filas.filter(f => f.est === 'mute').length} ya existen o repetidos</span><span class="pill p-bad">${filas.filter(f => f.est === 'bad').length} sin nombre o teléfono</span></div>
+   <div class="tblwrap"><table class="t imp-t"><thead><tr><th>Estado</th><th>Nombre</th><th>Teléfono</th><th>Email</th><th>Población</th><th>Interés / nota</th></tr></thead><tbody>${filas.slice(0, 200).map(f => `<tr class="st-${f.est}"><td><span class="pill p-${f.est === 'ok' ? 'done' : f.est}">${f.txt}</span></td><td>${esc(f.c.nombre)}</td><td>${esc(f.c.tel)}</td><td>${esc(f.c.email)}</td><td>${esc(f.c.pueblo)}</td><td>${esc([f.interes, f.nota].filter(Boolean).join(' · '))}</td></tr>`).join('')}</tbody></table></div>
+   ${filas.length > 200 ? `<p class="hint">Se muestran las 200 primeras filas de ${filas.length}.</p>` : ''}
+   ${IMP.hecho ? `<p class="ok"><b>${IMP.hecho}</b></p>` : `<button class="btn sun big" data-act="impGo" ${ok ? '' : 'disabled'}>Importar ${ok} lead${ok === 1 ? '' : 's'}</button>`}`;
+}
+async function impGo(btn) {
+  const filas = impFilas().filter(f => f.est === 'ok'), origen = ($('xlsOr')?.value || '').trim() || 'Empresa externa';
+  btn.disabled = true; let n = 0, fallos = 0;
+  for (const f of filas) {
+    btn.textContent = `Importando ${n + fallos + 1} de ${filas.length}…`;
+    const tipos = /aerot/i.test(f.interes) && !/placa|solar|fotov/i.test(f.interes) ? ['aero'] : ['fv'];
+    try { await rpc('importar_lead', { p_cliente: f.c, p_origen: origen, p_interes: f.interes, p_tipos: tipos, p_nota: f.nota || null }); n++; } catch (e) { fallos++; }
+  }
+  await loadAll(); IMP.hecho = `Importados ${n} lead${n === 1 ? '' : 's'}${fallos ? ` · ${fallos} no se han podido importar` : ''}. Ya están en Leads, con origen «${origen}».`;
+  await impDuplicados(); impRender(); toast(`Importados ${n} leads.`);
+}
+document.addEventListener('change', ev => {
+  if (ev.target.id === 'xlsIn' && ev.target.files[0]) impLeer(ev.target.files[0]);
+  const mi = ev.target.closest?.('[data-imp]'); if (mi && IMP) { IMP.map[mi.dataset.imp] = +mi.value; IMP.hecho = null; impDuplicados().then(impRender); }
+  if (['agCom', 'agDia', 'agHora'].includes(ev.target.id)) updateChoque();
+});
+document.addEventListener('input', ev => { if (['agHora', 'agDia'].includes(ev.target.id)) updateChoque(); });
 
 /* ---------- tiempo real ---------- */
 let rtTimer = null, lastPend = null;
@@ -227,13 +347,14 @@ function onRemote() {
     await loadAll();
     if (sel && detail.id === sel) await loadDetail(sel);
     const after = E.filter(needsMe).length;
-    if (after > before) { toast('Tienes algo nuevo que hacer'); try { navigator.vibrate?.(150); } catch (e) { } }
+    const nAv = checkAvisos();
+    if (!nAv && after > before) { toast('Tienes algo nuevo que hacer'); ding(); }
     if (!document.querySelector('form.f:not(#fLogin) input:focus, form.f textarea:focus, .action input:focus, .action textarea:focus')) render(false, true);
   }, 400);
 }
 
 /* ---------- cabecera y menú ---------- */
-const VIEWT = { corr: 'Correcciones', ventas: 'Quién interviene', leads: 'Leads', agenda: 'Agenda', exp: 'Expedientes', act: 'Actividad del equipo', equipo: 'Equipo', tarifas: 'Tarifas' };
+const VIEWT = { importar: 'Importar leads de Excel', corr: 'Correcciones', ventas: 'Quién interviene', leads: 'Leads', agenda: 'Agenda', exp: 'Expedientes', act: 'Actividad del equipo', equipo: 'Equipo', tarifas: 'Tarifas' };
 function renderTop() {
   const hd = document.querySelector('header.top'); hd.hidden = !me;
   if (!me) { $('who').innerHTML = ''; $('crumb').innerHTML = ''; return; }
@@ -243,9 +364,9 @@ function renderTop() {
 }
 function menuItems() {
   const r = role(), it = [], pend = E.filter(needsMe).length;
-  if (r === 'captacion') { it.push(['new:lead', '+ Nuevo lead', 'Llamada, web, WhatsApp o feria', 0, 1]); it.push(['leads', 'Leads', 'Contactar y agendar visitas', pend]); it.push(['agenda', 'Agenda de comerciales', 'Ver huecos antes de dar cita', 0]); }
+  if (r === 'captacion') { it.push(['new:lead', '+ Nuevo lead', 'Llamada, web, WhatsApp o feria', 0, 1]); it.push(['leads', 'Leads', 'Contactar y agendar visitas', pend]); it.push(['agenda', 'Agenda de comerciales', 'Ver huecos antes de dar cita', 0]); it.push(['importar', 'Importar leads de Excel', 'Listas de la empresa externa', 0]); }
   if (r === 'comercial') { it.push(['agenda', 'Mi agenda', 'Visitas y rellenar la ficha', E.filter(e => e.comercial === me.id && e.etapa === 'visita').length]); it.push(['new:ficha', '+ Ficha sin cita', 'Visita que no venía de captación', 0, 1]); it.push(['exp', 'Mis expedientes', 'Respuestas de clientes y estado', E.filter(e => e.comercial === me.id && e.etapa === 'enviado').length]); }
-  if (r === 'oficina') { it.push(['exp', 'Bandeja', 'Fichas nuevas, presupuestos y envíos', pend]); it.push(['new:lead', '+ Nuevo lead', 'Si entra una llamada en oficina', 0]); it.push(['agenda', 'Agenda', 'Visitas de comerciales', 0]); }
+  if (r === 'oficina') { it.push(['exp', 'Bandeja', 'Fichas nuevas, presupuestos y envíos', pend]); it.push(['new:lead', '+ Nuevo lead', 'Si entra una llamada en oficina', 0]); it.push(['agenda', 'Agenda', 'Visitas de comerciales', 0]); it.push(['importar', 'Importar leads de Excel', 'Listas de la empresa externa', 0]); }
   if (r === 'direccion') { it.push(['exp', 'Expedientes', 'Visto bueno y revisión de todo', pend]); it.push(['corr', 'Correcciones', 'Las que has indicado y si están hechas', CORR.filter(c => !c.done).length]); it.push(['ventas', 'Quién interviene', 'Ventas cerradas y quién hizo cada paso', 0]); it.push(['act', 'Actividad del equipo', 'Quién ha hecho qué y cuándo', 0]); it.push(['agenda', 'Agenda', 'Visitas de comerciales', 0]); }
   if (['captacion', 'comercial', 'oficina', 'direccion'].includes(r)) it.push(['tarifas', 'Tarifas', r === 'oficina' ? 'Ver y cambiar precios' : 'Precios y cuotas', 0]);
   if (me.admin) it.push(['equipo', 'Equipo', 'Altas, roles y contraseñas', 0]);
@@ -274,6 +395,7 @@ function renderMenu() {
   <div class="home">
    ${nw.map(([k, t, d]) => `<button type="button" class="mbtn new slim" data-go="${k}"><b>${t}</b><span class="d">${d}</span></button>`).join('')}
    <section><h2 class="h-sec">Lo que te toca</h2>${nTask ? `<div class="tasks">${corrHTML}${tasks.map(e => `<button type="button" class="task" data-task="${e.id}"><span class="t-a">${esc(taskLabel(e))}</span><b>${esc(e.cliente?.nombre)}</b><span class="hint">${esc(sumario(e))}${e.cliente?.pueblo ? ' · ' + esc(e.cliente.pueblo) : ''}</span></button>`).join('')}</div>` : `<div class="empty panel">No tienes nada pendiente. Cuando llegue algo nuevo aparecerá aquí al momento.</div>`}</section>
+   ${avisosHTML()}
    <section><h2 class="h-sec">Más</h2><div class="more">${rest.map(([k, t, d, n]) => `<button type="button" class="mini" data-go="${k}"><b>${t}</b>${n ? `<span class="badge">${n}</span>` : ''}<span class="hint">${d}</span></button>`).join('')}</div></section>
   </div>`;
 }
@@ -284,7 +406,7 @@ async function render(showDetail, soft) {
   if (!me) return;
   if (!view) return renderMenu();
   if (['exp', 'leads'].includes(view)) return renderGrid(showDetail, soft);
-  ({ agenda: renderAgenda, act: renderAct, ventas: renderVentas, corr: renderCorr, equipo: renderEquipo, tarifas: renderTarifas })[view]();
+  ({ agenda: renderAgenda, act: renderAct, ventas: renderVentas, corr: renderCorr, equipo: renderEquipo, tarifas: renderTarifas, importar: renderImport })[view]();
 }
 
 /* ---------- lista + expediente ---------- */
@@ -348,11 +470,13 @@ function actionMain(e) {
     <label class="fl">Nota del contacto (opcional)<input type="text" id="segNota" placeholder="Ej.: casa en propiedad, quiere 8 placas"></label>
     <div class="row"><label class="fl">Comercial<select id="agCom">${comerciales().map(p => `<option value="${p.id}">${esc(p.nombre)}</option>`).join('') || '<option value="">No hay comerciales dados de alta</option>'}</select></label>
     <label class="fl">Día<input type="date" id="agDia" value="${today()}"></label><label class="fl">Hora<input type="time" id="agHora" value="10:00"></label></div>
+    <div id="agChoque" class="agchoque" aria-live="polite"></div>
     <label class="fl">Dirección de la visita<input type="text" id="agDir" value="${esc(c.calle || '')}" placeholder="Calle y número"></label>
     <div class="row"><button class="btn primary" data-act="agendar">Agendar visita</button><button class="btn ghost" data-act="descartar">Descartar lead</button></div></div>`;
   if (r === 'comercial' && e.comercial === me.id && e.etapa === 'visita') return `<div class="action"><h3>Visita ${fDate(e.visita_fecha)} · ${hhmm(e.visita_hora)}</h3><p>Al terminar, rellena la ficha. Le llega a oficina al momento.</p><button class="btn sun big" data-act="ficha">Rellenar ficha de visita</button></div>`;
   if (['captacion', 'oficina'].includes(r) && e.etapa === 'visita') return `<div class="action wait"><h3>Visita con ${esc(nm(e.comercial))}</h3><p>${fDate(e.visita_fecha)} a las ${hhmm(e.visita_hora)}. Para cambiarla, reprograma aquí.</p>
     <div class="row"><label class="fl">Día<input type="date" id="agDia" value="${e.visita_fecha || today()}"></label><label class="fl">Hora<input type="time" id="agHora" value="${hhmm(e.visita_hora) || '10:00'}"></label><label class="fl">Comercial<select id="agCom">${comerciales().map(p => `<option value="${p.id}" ${p.id === e.comercial ? 'selected' : ''}>${esc(p.nombre)}</option>`).join('')}</select></label></div>
+    <div id="agChoque" class="agchoque" aria-live="polite"></div>
     <input type="hidden" id="agDir" value="${esc(c.calle || '')}"><div class="row"><button class="btn sm" data-act="agendar">Guardar cambio de visita</button><button class="btn ghost sm" data-act="descartar">Descartar</button></div></div>`;
   if (r === 'oficina' && e.etapa === 'solicitud') return `<div class="action"><h3>Ficha nueva de ${esc(nm(e.comercial))}</h3><p>Al aceptarla, el comercial ve que oficina ya la tiene.</p><button class="btn primary big" data-act="aceptar">Aceptar y empezar presupuesto</button></div>`;
   if (r === 'oficina' && ['preparacion', 'devuelta'].includes(e.etapa)) {
@@ -397,7 +521,19 @@ function actionMain(e) {
 }
 
 const SUBS = [['res', 'Resumen'], ['traz', 'Trazabilidad'], ['ficha', 'Ficha de visita'], ['pres', 'Presupuesto'], ['docs', 'Documentos']];
+const toMin = h => { const m = /^(\d{1,2}):(\d{2})/.exec(String(h || '')); return m ? +m[1] * 60 + +m[2] : null; };
+function updateChoque() {
+  const box = $('agChoque'); if (!box) return;
+  const com = $('agCom')?.value, dia = $('agDia')?.value, hora = toMin($('agHora')?.value);
+  if (!com || !dia) { box.innerHTML = ''; return; }
+  const l = E.filter(x => x.id !== sel && x.comercial === com && x.visita_fecha === dia && x.etapa !== 'descartado').sort((a, b) => String(a.visita_hora).localeCompare(String(b.visita_hora)));
+  if (!l.length) { box.innerHTML = `<span class="ok">${esc(nm(com))} no tiene más visitas ese día.</span>`; return; }
+  const cerca = hora == null ? [] : l.filter(x => Math.abs((toMin(x.visita_hora) ?? -999) - hora) < 90);
+  box.innerHTML = `${cerca.length ? `<b class="bad">Ojo: coincide con ${cerca.map(x => `la visita de las ${hhmm(x.visita_hora)} (${esc(x.cliente?.nombre || '')}${x.cliente?.pueblo ? ', ' + esc(x.cliente.pueblo) : ''})`).join(' y ')}. Deja al menos hora y media o elige otra hora.</b>` : ''}
+   <span>Ese día ${esc(nm(com))} tiene: ${l.map(x => `<b>${hhmm(x.visita_hora)}</b> ${esc(x.cliente?.nombre || '')}${x.cliente?.pueblo ? ' (' + esc(x.cliente.pueblo) + ')' : ''}`).join(' · ')}</span>`;
+}
 function renderDetail() {
+  setTimeout(updateChoque, 0);
   const d = $('detail'); if (!d) return;
   if (mode === 'ficha') { d.innerHTML = fichaForm(); bindFicha(); return; }
   if (mode === 'lead') { d.innerHTML = leadForm(); bindLead(); return; }
@@ -468,15 +604,30 @@ function leadForm() {
   return `<button class="btn ghost sm back" data-act="back">← Volver</button><div class="d-head"><h1>Nuevo lead</h1></div><p class="d-meta">Llamada, formulario web, WhatsApp o feria.</p>
   <form class="f" id="fLead" novalidate><fieldset><legend>Contacto</legend>
    <label class="fl">Nombre *<input type="text" id="lNom"></label><label class="fl">Teléfono *<input type="tel" id="lTel"></label><label class="fl">Email<input type="email" id="lMail"></label>
+   <div id="dupBox" class="wide" aria-live="polite"></div>
    <label class="fl">Población<input type="text" id="lPob"></label><label class="fl">Comarca<input type="text" id="lCom"></label>
    <label class="fl">Origen<select id="lOr">${opt(['Formulario web', 'Teléfono', 'WhatsApp', 'Recomendación', 'Feria', 'Redes sociales'], 'Teléfono')}</select></label>
    <div class="chips"><label><input type="checkbox" id="lFv" checked> Placas</label><label><input type="checkbox" id="lBat"> Batería</label><label><input type="checkbox" id="lAe"> Aerotermia</label><label><input type="checkbox" id="lCar"> Cargador coche</label></div>
    <label class="fl wide">Nota<textarea id="lNota"></textarea></label></fieldset>
    <span class="err hide" id="errL"></span><button class="btn sun big" type="submit">Guardar lead</button></form>`;
 }
+let DUPS = [];
+const telKey = t => { const d = String(t || '').replace(/\D/g, ''); return d.length >= 6 ? d.slice(-9) : ''; };
+const mailKey = m => { const x = String(m || '').trim().toLowerCase(); return x.includes('@') ? x : ''; };
+async function buscarDup(tel, mail) {
+  const box = $('dupBox'); if (!box) return;
+  const tk = telKey(tel), mk = mailKey(mail);
+  if (!tk && !mk) { DUPS = []; box.innerHTML = ''; return; }
+  try { DUPS = await rpc('buscar_duplicados', { p_tels: tk ? [tk] : [], p_emails: mk ? [mk] : [] }) || []; } catch (e) { DUPS = []; }
+  if (!$('dupBox')) return;
+  $('dupBox').innerHTML = DUPS.length ? `<div class="dupwarn"><b>Ojo: este cliente ya existe</b>${DUPS.slice(0, 5).map(d => `<div class="dupit"><span>${esc(d.nombre || '')}${d.pueblo ? ' · ' + esc(d.pueblo) : ''} · <span class="pill ${ST[d.etapa]?.c || ''}">${esc(ST[d.etapa]?.t || d.etapa)}</span>${d.comercial ? ' · lo lleva ' + esc(d.comercial) : ''}</span>${E.some(e => e.id === d.id) ? `<button type="button" class="btn sm" data-open="${d.id}">Abrir</button>` : ''}</div>`).join('')}<label class="dupok"><input type="checkbox" id="dupOk"> Es otro cliente: crearlo igualmente</label></div>` : '';
+}
 function bindLead() {
+  let dupT = null; const chk = () => { clearTimeout(dupT); dupT = setTimeout(() => { if ($('lTel')) buscarDup($('lTel').value, $('lMail')?.value); }, 350); };
+  $('lTel').addEventListener('input', chk); $('lMail').addEventListener('input', chk);
   $('fLead').addEventListener('submit', async ev => {
     ev.preventDefault(); const v = id => $(id).value.trim(), c = id => $(id).checked, b = ev.submitter;
+    if (DUPS.length && !$('dupOk')?.checked) { $('errL').textContent = 'Este cliente ya existe. Ábrelo, o marca «Es otro cliente» para crearlo igualmente.'; $('errL').classList.remove('hide'); $('dupBox').scrollIntoView({ block: 'center' }); return; }
     const int = [c('lFv') && 'Placas', c('lBat') && 'batería', c('lAe') && 'aerotermia', c('lCar') && 'cargador coche'].filter(Boolean).join(' + ');
     busy(b, true);
     try {
@@ -571,6 +722,7 @@ async function act(a, el) {
   if (a === 'back') { mode = 'view'; if (window.innerWidth <= 860) sel = null; return render(); }
   if (a === 'propuesta') return openProp(e);
   if (a === 'closeModal') { $('modalSlot').innerHTML = ''; return; }
+  if (a === 'impGo') return impGo(el);
   if (a === 'ficha') { mode = 'ficha'; return render(true); }
   if (!e) return;
   busy(el, true);
